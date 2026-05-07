@@ -30,7 +30,6 @@ Usage:
 """
 
 import argparse
-import copy
 import logging
 import os
 import sys
