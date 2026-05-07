@@ -512,8 +512,14 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     threshold   = cfg["graph"]["threshold"]
     abs_corr    = cfg["graph"]["abs_correlation"]
 
+    if window <= 0 or long_window <= 0:
+        raise ValueError(
+            f"Configured rolling windows must be > 0, got window={window}, "
+            f"long_window={long_window}"
+        )
+
     T            = len(returns)
-    start_t      = long_window           # need enough history for long window
+    start_t      = max(window, long_window)  # need enough history for all windows
     n_windows    = T - start_t
 
     # Feature dim: 7 short + 7 long + 11 sector = 25
