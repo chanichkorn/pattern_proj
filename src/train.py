@@ -95,31 +95,35 @@ class EMA:
         self._register()
 
     def _register(self) -> None:
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone().detach()
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name] = param.detach().clone()
 
     def update(self) -> None:
         """Call after each generator optimiser step."""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and name in self.shadow:
-                self.shadow[name].mul_(self.decay).add_(
-                    param.data, alpha=1.0 - self.decay
-                )
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and name in self.shadow:
+                    self.shadow[name].mul_(self.decay).add_(
+                        param.detach(), alpha=1.0 - self.decay
+                    )
 
     def apply_shadow(self) -> None:
         """Swap live weights with EMA weights (for inference)."""
         self._backup: dict = {}
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and name in self.shadow:
-                self._backup[name] = param.data.clone()
-                param.data.copy_(self.shadow[name])
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and name in self.shadow:
+                    self._backup[name] = param.detach().clone()
+                    param.copy_(self.shadow[name])
 
     def restore(self) -> None:
         """Restore live weights after inference."""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and name in self._backup:
-                param.data.copy_(self._backup[name])
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and name in self._backup:
+                    param.copy_(self._backup[name])
         self._backup = {}
 
     class _ShadowContext:
