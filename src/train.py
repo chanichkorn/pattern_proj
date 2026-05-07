@@ -25,16 +25,35 @@ Training improvements over baseline:
   • Gradient clipping (max_norm from config) for stable training
   • Exponential Moving Average (EMA) of Generator weights for stable inference
 
+Run directory layout (each run is self-contained):
+    results/<run_name>/
+        config.yaml          ← copy of config used for this run
+        training_history.npy
+        checkpoints/
+            best.pt
+            epoch_XXXX.pt
+            final.pt
+
 Usage:
+    # Custom name
+    python src/train.py --config configs/config.yaml --run-name v1_lr3e4
+
+    # use timestamp
     python src/train.py --config configs/config.yaml
+
+    # Resume from checkpoint
+    python src/train.py --config configs/config.yaml --run-name v1_lr3e4 \\
+                        --resume results/v1_lr3e4/checkpoints/epoch_0240.pt
 """
 
 import argparse
 import logging
 import os
+import shutil
 import sys
 import time
 from contextlib import nullcontext
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -359,12 +378,48 @@ def validate(
 
 
 # ---------------------------------------------------------------------------
+# Run directory resolver
+# ---------------------------------------------------------------------------
+
+def resolve_run_dir(run_name: str | None) -> Path:
+    """
+    return path of run directory
+
+    if --run-name  → results/<run_name>/
+    else           → results/run_<YYYYMMDD_HHMMSS>/
+    """
+    if run_name:
+        name = run_name.strip().replace(" ", "_")
+    else:
+        name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    return Path("results") / name
+
+
+# ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train(config_path: str, resume: str | None = None) -> None:
+def train(
+    config_path: str,
+    run_name: str | None = None,
+    resume: str | None = None,
+) -> Path:
+    """
+    Returns
+    -------
+    run_dir : Path   path of run directory 
+    """
     cfg    = load_config(config_path)
     device = get_device()
+
+    # ── Run directory ─────────────────────────────────────────────────────
+    run_dir  = resolve_run_dir(run_name)
+    ckpt_dir = run_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy2(config_path, run_dir / "config.yaml")
+
+    logger.info(f"Run directory    : {run_dir}")
     logger.info(f"Training on device: {device}")
 
     # ── Reproducibility ───────────────────────────────────────────────────
@@ -435,8 +490,6 @@ def train(config_path: str, resume: str | None = None) -> None:
 
     # ── Resume ────────────────────────────────────────────────────────────
     start_epoch = 0
-    ckpt_dir    = Path("results/checkpoints")
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     if resume:
         start_epoch = load_checkpoint(
@@ -516,12 +569,12 @@ def train(config_path: str, resume: str | None = None) -> None:
         ema=ema,
     )
 
-    # Save training history
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
-    np.save(str(results_dir / "training_history.npy"), history)
-    logger.info("Training complete.")
+    # Save training history inside run folder
+    np.save(str(run_dir / "training_history.npy"), history)
+    logger.info(f"Training complete.  Run saved → {run_dir}")
     logger.info(f"Best val Wasserstein distance: {best_val_w:.4f}")
+
+    return run_dir
 
 
 # ---------------------------------------------------------------------------
@@ -530,8 +583,11 @@ def train(config_path: str, resume: str | None = None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train GAT + WGAN-GP")
-    parser.add_argument("--config", default="configs/config.yaml")
-    parser.add_argument("--resume", default=None,
-                        help="Path to checkpoint to resume from")
+    parser.add_argument("--config",   default="configs/config.yaml",
+                        help="Path to config YAML")
+    parser.add_argument("--run-name", default=None,
+                        help="dir name e.g. v1_lr3e4  (use timestamp if not define)")
+    parser.add_argument("--resume",   default=None,
+                        help="Path to checkpoint for resuming e.g. results/v1/checkpoints/epoch_0240.pt")
     args = parser.parse_args()
-    train(args.config, resume=args.resume)
+    train(args.config, run_name=args.run_name, resume=args.resume)

@@ -22,8 +22,11 @@ Baselines included:
     3. Buy-and-Hold SET50 Index (approximated as equal weight, static)
 
 Usage:
-    python src/backtest.py --config configs/config.yaml \
-                           --checkpoint results/checkpoints/final.pt
+    # point to run folder 
+    python src/backtest.py --run-dir results/v1_lr3e4
+
+    # custom checkpoint name
+    python src/backtest.py --run-dir results/v1_lr3e4 --checkpoint epoch_0240.pt
 """
 
 import argparse
@@ -363,22 +366,30 @@ def print_results_table(results: dict) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Walk-forward backtest")
-    parser.add_argument("--config",     default="configs/config.yaml")
-    parser.add_argument("--checkpoint", default="results/checkpoints/final.pt")
+    parser.add_argument("--run-dir",    required=True,
+                        help="Path of run folder e.g. results/v1_lr3e4")
+    parser.add_argument("--checkpoint", default="best.pt",
+                        help="name of checkpoint in <run-dir>/checkpoints/ (default: best.pt)")
     parser.add_argument("--n-samples",  type=int, default=10,
                         help="GAN samples to average per window (higher = more stable)")
     args = parser.parse_args()
 
+    run_dir     = Path(args.run_dir)
+    config_path = str(run_dir / "config.yaml")
+    ckpt_path   = str(run_dir / "checkpoints" / args.checkpoint)
+
+    logger.info(f"Run dir    : {run_dir}")
+    logger.info(f"Config     : {config_path}")
+    logger.info(f"Checkpoint : {ckpt_path}")
+
     results = run_backtest(
-        config_path     = args.config,
-        checkpoint_path = args.checkpoint,
+        config_path     = config_path,
+        checkpoint_path = ckpt_path,
         n_gen_samples   = args.n_samples,
     )
 
     print_results_table(results)
 
     # Save results
-    out_dir = Path("results")
-    out_dir.mkdir(exist_ok=True)
-    np.save(str(out_dir / "backtest_results.npy"), results)
-    logger.info("Results saved to results/backtest_results.npy")
+    np.save(str(run_dir / "backtest_results.npy"), results)
+    logger.info(f"Results saved → {run_dir}/backtest_results.npy")

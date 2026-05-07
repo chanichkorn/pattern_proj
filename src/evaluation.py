@@ -14,8 +14,11 @@ Generates all plots needed for the project presentation:
   7. Results summary table          (printed + saved as CSV)
 
 Usage:
-    python src/evaluation.py --config configs/config.yaml \
-                             --checkpoint results/checkpoints/final.pt
+    # point to run folder — read config, checkpoint, training_history
+    python src/evaluation.py --run-dir results/v1_lr3e4
+
+    # custom checkpoint name 
+    python src/evaluation.py --run-dir results/v1_lr3e4 --checkpoint epoch_0240.pt
 """
 
 import argparse
@@ -330,7 +333,18 @@ def print_and_save_table(results: dict, out_path: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def run_evaluation(config_path: str, checkpoint_path: str) -> None:
+def run_evaluation(
+    config_path: str,
+    checkpoint_path: str,
+    run_dir: Path | None = None,
+) -> None:
+    """
+    Parameters
+    ----------
+    config_path     : path of config.yaml
+    checkpoint_path : path of .pt checkpoint
+    run_dir         : run folder
+    """
     cfg    = load_config(config_path)
     device = (
         torch.device("mps")  if torch.backends.mps.is_available() else
@@ -338,7 +352,7 @@ def run_evaluation(config_path: str, checkpoint_path: str) -> None:
         torch.device("cpu")
     )
 
-    out_dir = Path("results/figures")
+    out_dir = (Path(run_dir) / "figures") if run_dir else Path("results/figures")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Run backtest ──────────────────────────────────────────────────────
@@ -390,8 +404,13 @@ def run_evaluation(config_path: str, checkpoint_path: str) -> None:
     )
 
     # ── Plot 5: Training curves ───────────────────────────────────────────
+    history_path = (
+        str(Path(run_dir) / "training_history.npy")
+        if run_dir
+        else "results/training_history.npy"
+    )
     plot_training_curves(
-        "results/training_history.npy",
+        history_path,
         str(out_dir / "5_training_curves.png")
     )
 
@@ -421,8 +440,18 @@ def run_evaluation(config_path: str, checkpoint_path: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluation & Visualisation")
-    parser.add_argument("--config",     default="configs/config.yaml")
-    parser.add_argument("--checkpoint", default="results/checkpoints/final.pt")
+    parser.add_argument("--run-dir",    required=True,
+                        help="Path of run folder e.g. results/v1_lr3e4")
+    parser.add_argument("--checkpoint", default="best.pt",
+                        help="Checkpoint name in <run-dir>/checkpoints/ (default: best.pt)")
     args = parser.parse_args()
 
-    run_evaluation(args.config, args.checkpoint)
+    run_dir     = Path(args.run_dir)
+    config_path = str(run_dir / "config.yaml")
+    ckpt_path   = str(run_dir / "checkpoints" / args.checkpoint)
+
+    logger.info(f"Run dir    : {run_dir}")
+    logger.info(f"Config     : {config_path}")
+    logger.info(f"Checkpoint : {ckpt_path}")
+
+    run_evaluation(config_path, ckpt_path, run_dir=run_dir)
