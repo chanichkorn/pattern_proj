@@ -92,15 +92,18 @@ def fetch_prices(
 
         if csv_file.exists() and not force_refresh:
             df_cached = pd.read_csv(csv_file, index_col=0, parse_dates=True)
-            # Support both old (1-col Close-only) and new (Close+Volume) formats
-            if "Close" in df_cached.columns:
-                price_frames[ticker]  = df_cached["Close"].rename(ticker)
-                if "Volume" in df_cached.columns:
-                    volume_frames[ticker] = df_cached["Volume"].rename(ticker)
-            else:
-                # Legacy: single unnamed column is Close
-                price_frames[ticker] = df_cached.squeeze("columns").rename(ticker)
-            continue
+            # Only reuse cache when it matches the current expected schema.
+            # Legacy close-only caches should be refreshed so volume is populated.
+            if "Close" in df_cached.columns and "Volume" in df_cached.columns:
+                price_frames[ticker] = df_cached["Close"].rename(ticker)
+                volume_frames[ticker] = df_cached["Volume"].rename(ticker)
+                continue
+
+            logger.warning(
+                "Cached data for %s is missing Volume; re-downloading. "
+                "Use --force_refresh to refresh all cached tickers.",
+                ticker,
+            )
 
         # ── Fresh download ────────────────────────────────────────────────
         try:
