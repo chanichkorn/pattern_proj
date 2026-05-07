@@ -35,6 +35,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -330,7 +331,7 @@ def validate(
     tracker   = MetricTracker()
 
     # Use EMA weights for validation if available
-    ctx = ema.average_parameters() if ema is not None else _null_context()
+    ctx = ema.average_parameters() if ema is not None else nullcontext()
     with ctx:
         for batch in loader:
             X      = batch["X"].to(device)
@@ -352,12 +353,6 @@ def validate(
             )
 
     return tracker.summary()
-
-
-class _null_context:
-    """No-op context manager used when EMA is disabled."""
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
 
 
 # ---------------------------------------------------------------------------
@@ -478,14 +473,15 @@ def train(config_path: str, resume: str | None = None) -> None:
         # Log
         if (epoch + 1) % log_every == 0 or epoch == 0:
             elapsed = time.time() - t0
-            lr_now  = opt_G.param_groups[0]["lr"]
+            lr_g = opt_G.param_groups[0]["lr"]
+            lr_d = opt_D.param_groups[0]["lr"]
             logger.info(
                 f"Epoch {epoch+1:4d}/{epochs} | "
                 f"L_D={train_metrics.get('loss_D', float('nan')):.4f} | "
                 f"L_G={train_metrics.get('loss_G', float('nan')):.4f} | "
                 f"W={train_metrics.get('wasserstein', float('nan')):.4f} | "
                 f"val_W={val_metrics.get('val_wasserstein', float('nan')):.4f} | "
-                f"lr={lr_now:.2e} | "
+                f"lr_G={lr_g:.2e} lr_D={lr_d:.2e} | "
                 f"{elapsed:.1f}s"
             )
 

@@ -242,7 +242,9 @@ def compute_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
 def _compute_rsi(r: np.ndarray, period: int = 14) -> float:
     """
     RSI normalised to [0, 1].  0 = oversold, 1 = overbought.
-    Uses the simple (non-smoothed) Wilder average over the last `period` bars.
+    Uses a simple arithmetic average of gains and losses over the last
+    `period` bars (computationally cheap; captures the same signal as
+    Wilder's EMA for the rolling-window use-case here).
     """
     if len(r) < period:
         return 0.5
@@ -324,7 +326,8 @@ def _window_features(
         F[i, 1] = r.sum()
         # Realized volatility
         F[i, 2] = float(r.std())
-        # Volume z-score
+        # Volume z-score: clip to [-3, 3] to suppress extreme outliers
+        # (same clipping convention used for the vol_zscore in the long window)
         v_std = float(v.std())
         if v_std > 1e-8:
             F[i, 3] = float(np.clip((v[-1] - v.mean()) / v_std, -3.0, 3.0))
