@@ -112,11 +112,11 @@ def vec_to_cholesky(v: torch.Tensor, N: int) -> torch.Tensor:
 class ResBlock(nn.Module):
     """
     A residual block with the structure:
-        y = LayerNorm(x + Linear(LeakyReLU(LayerNorm(Linear(x)))))
+        y = x + Linear(LeakyReLU(LayerNorm(Linear(LeakyReLU(LayerNorm(x))))))
 
-    Using a pre-activation (norm before activation) style for stable training.
-    Both linear layers operate in the same dimension so the skip connection
-    requires no projection.
+    Using a pre-activation (norm before activation) style within the residual
+    branch for stable training. Both linear layers operate in the same
+    dimension so the skip connection requires no projection.
     """
 
     def __init__(self, dim: int, negative_slope: float = 0.2):
