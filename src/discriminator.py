@@ -23,13 +23,16 @@ Architecture
 Input: [flatten(upper_triangle(C)) ‖ g]
        upper triangle has N*(N-1)//2 entries (excludes diagonal which is always 1)
 
-Linear(in → hidden)    + LayerNorm + LeakyReLU
-Linear(hidden → hidden) + LayerNorm + LeakyReLU
-Linear(hidden → hidden//2) + LeakyReLU
-Linear(hidden//2 → 1)                            ← raw score
+SN(Linear(in → hidden))  + LayerNorm + LeakyReLU
+SN(Linear(hidden → hidden)) + LayerNorm + LeakyReLU
+SN(Linear(hidden → hidden//2)) + LeakyReLU
+SN(Linear(hidden//2 → 1))                            ← raw score
 
 Note: LayerNorm (not BatchNorm) is used because BatchNorm interferes with
 the gradient penalty computation in WGAN-GP.
+
+Spectral Normalization (SN) on each linear layer enforces the 1-Lipschitz
+constraint directly, complementing the gradient penalty for extra stability.
 """
 
 import logging
@@ -71,10 +74,14 @@ def flatten_upper_triangle(C: torch.Tensor) -> torch.Tensor:
 
 class Critic(nn.Module):
     """
-    WGAN-GP Critic (Discriminator).
+    WGAN-GP Critic (Discriminator) with Spectral Normalization.
 
     Scores a correlation matrix as real or fake, conditioned on the
     GAT graph embedding g so it understands the market context.
+
+    Spectral normalization on each Linear layer enforces the 1-Lipschitz
+    constraint directly, complementing the gradient penalty for extra
+    training stability.
 
     Parameters
     ----------
@@ -97,23 +104,25 @@ class Critic(nn.Module):
         tri_dim  = n_stocks * (n_stocks - 1) // 2
         in_dim   = tri_dim + condition_dim
 
+        sn = nn.utils.spectral_norm   # shorthand
+
         self.net = nn.Sequential(
             # Block 1
-            nn.Linear(in_dim, hidden_dim),
+            sn(nn.Linear(in_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
 
             # Block 2
-            nn.Linear(hidden_dim, hidden_dim),
+            sn(nn.Linear(hidden_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
 
             # Block 3 — bottleneck
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            sn(nn.Linear(hidden_dim, hidden_dim // 2)),
             nn.LeakyReLU(0.2),
 
             # Output — unbounded scalar (no activation)
-            nn.Linear(hidden_dim // 2, 1),
+            sn(nn.Linear(hidden_dim // 2, 1)),
         )
 
         self._init_weights()
@@ -288,3 +297,4 @@ if __name__ == "__main__":
     print(f"  Generator grads flow : {G_grad_ok}")
 
     print("\n✅  Critic + gradient penalty smoke test passed.")
+

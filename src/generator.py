@@ -27,6 +27,9 @@ This means:
 
 Number of free parameters for N=40:
     lower triangle entries = N*(N+1)/2 = 820
+
+Residual blocks improve gradient flow when producing the high-dimensional
+Cholesky output (820 entries for N=40).
 """
 
 import logging
@@ -103,19 +106,52 @@ def vec_to_cholesky(v: torch.Tensor, N: int) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
+# Residual Block
+# ---------------------------------------------------------------------------
+
+class ResBlock(nn.Module):
+    """
+    A residual block with the structure:
+        y = x + Linear(LeakyReLU(LayerNorm(Linear(LeakyReLU(LayerNorm(x))))))
+
+    Using a pre-activation (norm before activation) style within the residual
+    branch for stable training. Both linear layers operate in the same
+    dimension so the skip connection requires no projection.
+    """
+
+    def __init__(self, dim: int, negative_slope: float = 0.2):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.LeakyReLU(negative_slope),
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.LeakyReLU(negative_slope),
+            nn.Linear(dim, dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.block(x)
+
+
+# ---------------------------------------------------------------------------
 # Generator
 # ---------------------------------------------------------------------------
 
 class Generator(nn.Module):
     """
-    MLP Generator: (noise ‖ graph_embedding) → Cholesky → Correlation matrix.
+    MLP Generator with residual blocks:
+    (noise ‖ graph_embedding) → Cholesky → Correlation matrix.
 
     Architecture
     ------------
     Input  : [ε ‖ g]   dim = noise_dim + condition_dim
     Linear(in  → hidden)  + LayerNorm + LeakyReLU
+    ResBlock(hidden)
     Linear(hidden → hidden*2) + LayerNorm + LeakyReLU
+    ResBlock(hidden*2)
     Linear(hidden*2 → hidden) + LayerNorm + LeakyReLU
+    ResBlock(hidden)
     Linear(hidden → N*(N+1)//2)             ← Cholesky entries
     → vec_to_cholesky → cholesky_to_correlation
     Output : R̂  [B, N, N]   valid correlation matrix
@@ -137,20 +173,23 @@ class Generator(nn.Module):
         in_dim = noise_dim + condition_dim
 
         self.net = nn.Sequential(
-            # Block 1
+            # Entry projection
             nn.Linear(in_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
+            ResBlock(hidden_dim),
 
-            # Block 2
+            # Expand
             nn.Linear(hidden_dim, hidden_dim * 2),
             nn.LayerNorm(hidden_dim * 2),
             nn.LeakyReLU(0.2),
+            ResBlock(hidden_dim * 2),
 
-            # Block 3
+            # Contract
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
+            ResBlock(hidden_dim),
 
             # Output: Cholesky entries (no activation — handled in vec_to_cholesky)
             nn.Linear(hidden_dim, self.chol_dim),
@@ -298,3 +337,4 @@ if __name__ == "__main__":
     print(f"  Off-diag std across batch: {std_off_diag:.4f}  (> 0 = diverse)")
 
     print("\n✅  Generator smoke test passed.")
+

@@ -7,9 +7,19 @@ Responsibilities:
   1. Fetch OHLCV data for all SET50 tickers via yfinance
   2. Align all tickers to a common trading calendar
   3. Compute daily log returns
-  4. Generate rolling windows:
-       - Correlation matrix C_t  [N × N]  → GAN "real" samples
+  4. Generate rolling windows using two look-back horizons (short=21d, long=63d):
        - Node feature matrix X_t [N × d]  → GAT input
+         Features per stock (7 numeric per window × 2 windows + 11 sector one-hot):
+           [0]  5-day return           (short momentum)
+           [1]  w-day return           (window momentum)
+           [2]  realized volatility    (std of returns in window)
+           [3]  volume z-score         (last-day vol relative to window)
+           [4]  RSI-14                 (momentum oscillator, normalised [0,1])
+           [5]  Bollinger band width   (4·σ / |SMA| from price series)
+           [6]  return skewness        (distribution asymmetry)
+           ... repeated for long window (63d) ...
+           [14:] sector one-hot        (11 sectors)
+       - Correlation matrix C_t  [N × N]  → GAN "real" samples (short window)
        - Adjacency matrix A_t    [N × N]  → GAT graph structure
   5. Save processed artefacts to disk (parquet + npy)
 
@@ -26,6 +36,7 @@ import numpy as np
 import pandas as pd
 import yaml
 import yfinance as yf
+from scipy.stats import skew as scipy_skew
 from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
@@ -49,7 +60,7 @@ def load_config(config_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Fetch raw OHLCV
+# Step 1 — Fetch raw OHLCV (close + volume)
 # ---------------------------------------------------------------------------
 
 def fetch_prices(
@@ -58,33 +69,41 @@ def fetch_prices(
     end: str,
     raw_dir: str,
     force_refresh: bool = False,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Download adjusted-close prices for all tickers.
-    Caches each ticker as a CSV so re-runs skip network calls.
+    Download adjusted-close prices and volume for all tickers.
+    Caches each ticker as a two-column CSV (Close, Volume) so re-runs skip
+    network calls.
 
     Returns
     -------
-    prices : pd.DataFrame  [dates × tickers]  — adjusted close prices
+    prices  : pd.DataFrame  [dates × tickers]  — adjusted close prices
+    volumes : pd.DataFrame  [dates × tickers]  — daily traded volume
     """
     raw_path = Path(raw_dir)
     raw_path.mkdir(parents=True, exist_ok=True)
 
-    frames = {}
-    failed = []
+    price_frames  = {}
+    volume_frames = {}
+    failed        = []
 
     for ticker in tqdm(tickers, desc="Fetching tickers"):
-        # Cache stores only the close price as a clean single-column CSV
         csv_file = raw_path / f"{ticker.replace('.', '_')}.csv"
 
         if csv_file.exists() and not force_refresh:
-            # Cached CSV: single column (date → close price)
-            series = pd.read_csv(
-                csv_file, index_col=0, parse_dates=True
-            ).squeeze("columns")
-            series.name = ticker
-            frames[ticker] = series
-            continue
+            df_cached = pd.read_csv(csv_file, index_col=0, parse_dates=True)
+            # Only reuse cache when it matches the current expected schema.
+            # Legacy close-only caches should be refreshed so volume is populated.
+            if "Close" in df_cached.columns and "Volume" in df_cached.columns:
+                price_frames[ticker] = df_cached["Close"].rename(ticker)
+                volume_frames[ticker] = df_cached["Volume"].rename(ticker)
+                continue
+
+            logger.warning(
+                "Cached data for %s is missing Volume; re-downloading. "
+                "Use --force_refresh to refresh all cached tickers.",
+                ticker,
+            )
 
         # ── Fresh download ────────────────────────────────────────────────
         try:
@@ -116,28 +135,48 @@ def fetch_prices(
             failed.append(ticker)
             continue
 
-        series = df[close_col]
-        # If MultiIndex flatten produced duplicate col names, df[col] is a
-        # DataFrame — take the first column in that case
-        if isinstance(series, pd.DataFrame):
-            series = series.iloc[:, 0]
+        series_close = df[close_col]
+        if isinstance(series_close, pd.DataFrame):
+            series_close = series_close.iloc[:, 0]
+        series_close = series_close.dropna()
+        series_close.name = ticker
 
-        series = series.dropna()
-        series.name = ticker
+        # ── Extract volume ────────────────────────────────────────────────
+        series_vol = None
+        if "Volume" in df.columns:
+            series_vol = df["Volume"]
+            if isinstance(series_vol, pd.DataFrame):
+                series_vol = series_vol.iloc[:, 0]
+            series_vol = series_vol.reindex(series_close.index).fillna(0)
+            series_vol.name = ticker
 
-        # Cache as clean single-column CSV (no MultiIndex header)
-        series.to_frame(name="Close").to_csv(csv_file)
-        frames[ticker] = series
+        # ── Cache as two-column CSV ───────────────────────────────────────
+        cache_df = series_close.to_frame(name="Close")
+        if series_vol is not None:
+            cache_df["Volume"] = series_vol.values
+        cache_df.to_csv(csv_file)
+
+        price_frames[ticker] = series_close
+        if series_vol is not None:
+            volume_frames[ticker] = series_vol
 
     if failed:
         logger.warning(f"Skipped {len(failed)} tickers: {failed}")
 
-    prices = pd.DataFrame(frames)
+    prices = pd.DataFrame(price_frames)
     prices.index = pd.to_datetime(prices.index)
     prices.sort_index(inplace=True)
 
+    # Build volumes aligned to prices; fill missing with 0
+    if volume_frames:
+        volumes = pd.DataFrame(volume_frames).reindex(prices.index).fillna(0)
+    else:
+        volumes = pd.DataFrame(
+            np.zeros_like(prices.values), index=prices.index, columns=prices.columns
+        )
+
     logger.info(f"Fetched {prices.shape[1]} tickers × {prices.shape[0]} dates")
-    return prices
+    return prices, volumes
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +185,9 @@ def fetch_prices(
 
 def clean_prices(
     prices: pd.DataFrame,
+    volumes: pd.DataFrame,
     min_valid_fraction: float = 0.90,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     1. Drop tickers with too many missing values.
     2. Forward-fill remaining gaps (max 3 consecutive days).
@@ -155,28 +195,30 @@ def clean_prices(
 
     Returns
     -------
-    prices : pd.DataFrame  cleaned, all-numeric
+    prices  : pd.DataFrame  cleaned, all-numeric
+    volumes : pd.DataFrame  aligned to cleaned prices
     """
-    n_rows = len(prices)
-
     # Drop tickers below threshold
     valid_frac = prices.notna().mean()
     keep = valid_frac[valid_frac >= min_valid_fraction].index.tolist()
     dropped = set(prices.columns) - set(keep)
     if dropped:
         logger.warning(f"Dropping tickers with sparse data: {dropped}")
-    prices = prices[keep]
+    prices  = prices[keep]
+    volumes = volumes.reindex(columns=keep)
 
     # Forward-fill short gaps (holiday closures, suspension)
-    prices = prices.ffill(limit=3)
+    prices  = prices.ffill(limit=3)
+    volumes = volumes.ffill(limit=3).fillna(0)
 
     # Drop rows that still have NaNs (e.g., very beginning of series)
-    prices = prices.dropna()
+    prices  = prices.dropna()
+    volumes = volumes.reindex(prices.index).fillna(0)
 
     logger.info(
         f"Cleaned prices: {prices.shape[1]} tickers × {prices.shape[0]} trading days"
     )
-    return prices
+    return prices, volumes
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +239,110 @@ def compute_log_returns(prices: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Step 4 — Node features
+# Step 4 — Feature helper functions
 # ---------------------------------------------------------------------------
+
+def _compute_rsi(r: np.ndarray, period: int = 14) -> float:
+    """
+    RSI normalised to [0, 1].  0 = oversold, 1 = overbought.
+    Uses a simple arithmetic average of gains and losses over the last
+    `period` bars (computationally cheap; captures the same signal as
+    Wilder's EMA for the rolling-window use-case here).
+    """
+    if len(r) < period:
+        return 0.5
+    tail = r[-period:]
+    gains  = np.where(tail > 0, tail, 0.0).mean()
+    losses = np.where(tail < 0, -tail, 0.0).mean()
+    if losses < 1e-10:
+        return 1.0 if gains > 0 else 0.5
+    rs = gains / losses
+    rsi_100 = 100.0 - 100.0 / (1.0 + rs)
+    return rsi_100 / 100.0
+
+
+def _compute_bb_width(p: np.ndarray) -> float:
+    """
+    Bollinger Band width = (upper − lower) / middle
+                         = 4·σ / |SMA|
+
+    Applied to price series `p` over the window.
+    """
+    if len(p) < 2:
+        return 0.0
+    sma = np.abs(p.mean())
+    if sma < 1e-8:
+        return 0.0
+    return 4.0 * p.std() / sma
+
+
+def _compute_skewness(r: np.ndarray) -> float:
+    """Return the skewness of `r`, clipped to [-3, 3] for numerical safety."""
+    if len(r) < 3:
+        return 0.0
+    try:
+        s = float(scipy_skew(r, bias=False))
+        return float(np.clip(s, -3.0, 3.0))
+    except Exception:
+        return 0.0
+
+
+def _window_features(
+    returns: pd.DataFrame,
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
+    tickers: list[str],
+    t: int,
+    w: int,
+) -> np.ndarray:
+    """
+    Compute 7 numeric features per stock over look-back window of length `w`.
+
+    Feature layout (per stock):
+        [0] 5-day return  (short momentum, clipped at 5 or w)
+        [1] w-day return  (full window momentum)
+        [2] realized volatility (std of returns)
+        [3] volume z-score (last-day vol vs window mean/std)
+        [4] RSI-14
+        [5] Bollinger Band width (price-based)
+        [6] return skewness
+
+    Returns
+    -------
+    F : np.ndarray  [N, 7]
+    """
+    N  = len(tickers)
+    F  = np.zeros((N, 7), dtype=np.float32)
+
+    r_block = returns.iloc[t - w : t]   # [w, N]
+    p_block = prices.iloc[t - w : t]    # [w, N]
+    v_block = volumes.iloc[t - w : t]   # [w, N]
+
+    for i, ticker in enumerate(tickers):
+        r = r_block[ticker].values  # [w]
+        p = p_block[ticker].values  # [w]
+        v = v_block[ticker].values  # [w]
+
+        # 5-day return
+        F[i, 0] = r[-5:].sum() if len(r) >= 5 else r.sum()
+        # w-day return
+        F[i, 1] = r.sum()
+        # Realized volatility
+        F[i, 2] = float(r.std())
+        # Volume z-score: clip to [-3, 3] to suppress extreme outliers
+        # (same clipping convention used for the vol_zscore in the long window)
+        v_std = float(v.std())
+        if v_std > 1e-8:
+            F[i, 3] = float(np.clip((v[-1] - v.mean()) / v_std, -3.0, 3.0))
+        # RSI-14
+        F[i, 4] = _compute_rsi(r, 14)
+        # Bollinger Band width (from prices)
+        F[i, 5] = _compute_bb_width(p)
+        # Skewness
+        F[i, 6] = _compute_skewness(r)
+
+    return F   # [N, 7]
+
 
 SECTOR_LIST = [
     "Banking", "Energy", "Telecom", "Retail",
@@ -209,59 +353,56 @@ SECTOR_LIST = [
 
 def build_node_features(
     returns: pd.DataFrame,
+    prices: pd.DataFrame,
+    volumes: pd.DataFrame,
     t: int,
     window: int,
+    long_window: int,
     sector_map: dict[str, str],
 ) -> np.ndarray:
     """
     Build node feature matrix X_t for window ending at index t.
 
-    Features per stock (d = 4 numeric + len(SECTOR_LIST) sector one-hot):
-        [0]  5-day return           (short momentum)
-        [1]  21-day return          (medium momentum)
-        [2]  realized volatility    (std of returns in window)
-        [3]  volume z-score         (set to 0 if volume not available)
-        [4:] sector one-hot
+    Features per stock  (d = 7×2 + 11 = 25):
+        [0:7]  7 numeric features over the short window (21d)
+        [7:14] 7 numeric features over the long  window (63d)
+        [14:]  11 sector one-hot
 
     Parameters
     ----------
-    returns : pd.DataFrame  [dates × tickers]
-    t       : int           end index of current window (exclusive)
-    window  : int           look-back window length
-    sector_map : dict       ticker → sector string
+    returns     : pd.DataFrame  [dates × tickers]
+    prices      : pd.DataFrame  [dates × tickers]
+    volumes     : pd.DataFrame  [dates × tickers]
+    t           : int           end index of current window (exclusive)
+    window      : int           short look-back window length
+    long_window : int           long  look-back window length
+    sector_map  : dict          ticker → sector string
 
     Returns
     -------
     X : np.ndarray  [N × d]
     """
     tickers = returns.columns.tolist()
-    N = len(tickers)
-    window_returns = returns.iloc[t - window : t]  # [window × N]
+    N       = len(tickers)
+    n_sector = len(SECTOR_LIST)
+    d = 7 + 7 + n_sector   # = 25
 
-    n_numeric = 4
-    d = n_numeric + len(SECTOR_LIST)
     X = np.zeros((N, d), dtype=np.float32)
 
+    # ── Numeric features ──────────────────────────────────────────────────
+    F_short = _window_features(returns, prices, volumes, tickers, t, window)      # [N,7]
+    F_long  = _window_features(returns, prices, volumes, tickers, t, long_window)  # [N,7]
+
+    X[:, 0:7]  = F_short
+    X[:, 7:14] = F_long
+
+    # ── Sector one-hot ────────────────────────────────────────────────────
     for i, ticker in enumerate(tickers):
-        r = window_returns[ticker].values  # [window]
-
-        # --- numeric features ---
-        # 5-day return
-        X[i, 0] = r[-5:].sum() if len(r) >= 5 else r.sum()
-        # 21-day return (full window)
-        X[i, 1] = r.sum()
-        # Realized volatility
-        X[i, 2] = r.std()
-        # Volume z-score placeholder (0 until volume data added)
-        X[i, 3] = 0.0
-
-        # --- sector one-hot ---
         sector = sector_map.get(ticker, "")
         if sector in SECTOR_LIST:
-            sector_idx = SECTOR_LIST.index(sector)
-            X[i, n_numeric + sector_idx] = 1.0
+            X[i, 14 + SECTOR_LIST.index(sector)] = 1.0
 
-    return X  # [N × d]
+    return X   # [N × 25]
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +485,7 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     processed_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Fetch ──────────────────────────────────────────────────────────
-    prices = fetch_prices(
+    prices, volumes = fetch_prices(
         tickers=cfg["data"]["tickers"],
         start=cfg["data"]["start_date"],
         end=cfg["data"]["end_date"],
@@ -353,12 +494,14 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     )
 
     # ── 2. Clean ──────────────────────────────────────────────────────────
-    prices = clean_prices(prices, cfg["data"]["min_valid_fraction"])
+    prices, volumes = clean_prices(prices, volumes, cfg["data"]["min_valid_fraction"])
     tickers = prices.columns.tolist()
     N = len(tickers)
 
     # ── 3. Returns ────────────────────────────────────────────────────────
     returns = compute_log_returns(prices)
+    # Align volumes to the returns index (volumes keeps full price-aligned index)
+    volumes = volumes.reindex(returns.index).fillna(0)
 
     # Save intermediate
     prices.to_parquet(processed_dir / "prices.parquet")
@@ -366,26 +509,37 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     logger.info("Saved prices and returns to parquet.")
 
     # ── 4. Rolling windows ────────────────────────────────────────────────
-    window = cfg["data"]["window"]
-    sector_map = cfg["data"]["sector_map"]
-    threshold = cfg["graph"]["threshold"]
-    abs_corr = cfg["graph"]["abs_correlation"]
+    window      = cfg["data"]["window"]
+    long_window = cfg["data"].get("long_window", 63)
+    sector_map  = cfg["data"]["sector_map"]
+    threshold   = cfg["graph"]["threshold"]
+    abs_corr    = cfg["graph"]["abs_correlation"]
 
-    T = len(returns)
-    n_windows = T - window  # first usable t = window
+    if window <= 0 or long_window <= 0:
+        raise ValueError(
+            f"Configured rolling windows must be > 0, got window={window}, "
+            f"long_window={long_window}"
+        )
 
-    # Compute feature dim dynamically: 4 numeric + len(SECTOR_LIST) one-hot
-    feature_dim = 4 + len(SECTOR_LIST)
+    T            = len(returns)
+    start_t      = max(window, long_window)  # need enough history for all windows
+    n_windows    = T - start_t
 
-    logger.info(f"Generating {n_windows} rolling windows (T={window}, d={feature_dim})...")
+    # Feature dim: 7 short + 7 long + 11 sector = 25
+    feature_dim = 7 + 7 + len(SECTOR_LIST)
 
-    all_X = np.zeros((n_windows, N, feature_dim), dtype=np.float32)  # node features
-    all_A = np.zeros((n_windows, N, N), dtype=np.float32)            # adjacency
-    all_C = np.zeros((n_windows, N, N), dtype=np.float32)            # correlation
+    logger.info(
+        f"Generating {n_windows} rolling windows "
+        f"(short={window}d, long={long_window}d, d={feature_dim})..."
+    )
 
-    for idx, t in enumerate(tqdm(range(window, T), desc="Rolling windows")):
+    all_X = np.zeros((n_windows, N, feature_dim), dtype=np.float32)
+    all_A = np.zeros((n_windows, N, N), dtype=np.float32)
+    all_C = np.zeros((n_windows, N, N), dtype=np.float32)
+
+    for idx, t in enumerate(tqdm(range(start_t, T), desc="Rolling windows")):
         C = build_correlation_matrix(returns, t, window)
-        X = build_node_features(returns, t, window, sector_map)
+        X = build_node_features(returns, prices, volumes, t, window, long_window, sector_map)
         A = build_adjacency_matrix(C, threshold, abs_corr)
 
         all_C[idx] = C
@@ -401,16 +555,17 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     )
 
     # Save metadata
-    window_dates = returns.index[window:].strftime("%Y-%m-%d").tolist()
+    window_dates = returns.index[start_t:].strftime("%Y-%m-%d").tolist()
     metadata = {
-        "tickers": tickers,
-        "n_stocks": N,
-        "n_windows": n_windows,
-        "window_size": window,
-        "feature_dim": all_X.shape[-1],
+        "tickers":      tickers,
+        "n_stocks":     N,
+        "n_windows":    n_windows,
+        "window_size":  window,
+        "long_window":  long_window,
+        "feature_dim":  all_X.shape[-1],
         "window_dates": window_dates,
-        "start_date": cfg["data"]["start_date"],
-        "end_date": cfg["data"]["end_date"],
+        "start_date":   cfg["data"]["start_date"],
+        "end_date":     cfg["data"]["end_date"],
     }
     with open(processed_dir / "metadata.yaml", "w") as f:
         yaml.dump(metadata, f)
@@ -422,14 +577,14 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     )
 
     return {
-        "prices": prices,
-        "returns": returns,
-        "X": all_X,
-        "A": all_A,
-        "C": all_C,
-        "tickers": tickers,
-        "window_dates": window_dates,
-        "metadata": metadata,
+        "prices":        prices,
+        "returns":       returns,
+        "X":             all_X,
+        "A":             all_A,
+        "C":             all_C,
+        "tickers":       tickers,
+        "window_dates":  window_dates,
+        "metadata":      metadata,
     }
 
 
@@ -466,6 +621,16 @@ def print_diagnostics(data: dict) -> None:
     print(f"    avg degree per node : {avg_degree:.1f}")
     row_sum_ok = np.allclose(A.sum(axis=2), 1.0, atol=1e-5)
     print(f"    row-normalized      : {row_sum_ok}")
+
+    print()
+    print("  Node feature ranges (X):")
+    for j, name in enumerate(
+        ["5d_ret", "21d_ret", "vol", "vol_z", "RSI", "BB_w", "skew",
+         "5d_ret_L", "63d_ret", "vol_L", "vol_z_L", "RSI_L", "BB_w_L", "skew_L"]
+    ):
+        col = X[:, :, j].flatten()
+        print(f"    [{j:2d}] {name:<10}: mean={col.mean():+.4f}  std={col.std():.4f}")
+
     print("=" * 55 + "\n")
 
 
@@ -487,3 +652,4 @@ if __name__ == "__main__":
 
     data = run_pipeline(args.config, force_refresh=args.force_refresh)
     print_diagnostics(data)
+

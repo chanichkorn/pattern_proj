@@ -3,13 +3,14 @@
 # ============================================================
 
 data:
-  start_date: "2015-01-01"
-  end_date:   "2019-12-31"
+  start_date: "2010-01-01"
+  end_date:   "2023-12-31"
   raw_dir:    "data/raw"
   processed_dir: "data/processed"
 
-  # Rolling window for correlation & features (trading days)
-  window: 21
+  # Rolling windows for features (trading days)
+  window: 21        # short window: ~1 month
+  long_window: 63   # long window:  ~3 months
 
   # Minimum fraction of valid data required per stock
   min_valid_fraction: 0.90
@@ -127,17 +128,18 @@ graph:
 
 model:
   gat:
-    node_feature_dim: 15     # 4 numeric + 11 sector one-hot
+    node_feature_dim: 25     # 7 numeric × 2 windows (21d + 63d) + 11 sector one-hot
     hidden_dim: 64
     embedding_dim: 32
     num_heads_l1: 4
     num_heads_l2: 4
+    num_heads_l3: 4
     dropout: 0.1
 
   gan:
     noise_dim: 128
     condition_dim: 32        # = gat.embedding_dim (graph-level pooling)
-    hidden_dim: 512
+    hidden_dim: 1024
     n_critic_steps: 5
     gp_lambda: 10
     lr: 0.0001
@@ -145,6 +147,10 @@ model:
     beta2: 0.9
     batch_size: 64
     epochs: 300
+    use_ema: true
+    ema_decay: 0.999
+    grad_clip: 1.0
+    lr_scheduler: "cosine"
 
 backtest:
   train_months: 12
