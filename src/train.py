@@ -9,21 +9,28 @@ Pipeline per training step:
     3. [Critic steps × n_critic]
          a. Generate C_fake = G(noise, g)
          b. L_D = D(C_fake) - D(C_real) + λ·GP
-         c. Backprop, update Critic
+         c. Backprop, clip gradients, update Critic
     4. [Generator step]
          a. Generate C_fake = G(noise, g)
          b. L_G = -D(C_fake)
-         c. Backprop, update GAT + Generator jointly
+         c. Backprop, clip gradients, update GAT + Generator jointly
+    5. Update EMA shadow weights for Generator
 
 Both GAT and Generator are updated together in the generator step —
 the gradient flows: D → G → GAT. This means the GAT learns to produce
 graph embeddings g that help the Generator fool the Critic.
+
+Training improvements over baseline:
+  • CosineAnnealingLR schedulers for both optimisers (lr → eta_min=1e-6)
+  • Gradient clipping (max_norm from config) for stable training
+  • Exponential Moving Average (EMA) of Generator weights for stable inference
 
 Usage:
     python src/train.py --config configs/config.yaml
 """
 
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -62,6 +69,73 @@ def get_device() -> torch.device:
         return torch.device("cuda")
     else:
         return torch.device("cpu")
+
+
+# ---------------------------------------------------------------------------
+# Exponential Moving Average (EMA) for Generator
+# ---------------------------------------------------------------------------
+
+class EMA:
+    """
+    Maintains an exponential moving average of a model's parameters.
+
+    Usage:
+        ema = EMA(generator, decay=0.999)
+        # after each generator update:
+        ema.update()
+        # for validation / inference:
+        with ema.average_parameters():
+            R = generator.sample(g)
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.model  = model
+        self.decay  = decay
+        self.shadow: dict = {}
+        self._register()
+
+    def _register(self) -> None:
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone().detach()
+
+    def update(self) -> None:
+        """Call after each generator optimiser step."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(
+                    param.data, alpha=1.0 - self.decay
+                )
+
+    def apply_shadow(self) -> None:
+        """Swap live weights with EMA weights (for inference)."""
+        self._backup: dict = {}
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self._backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self) -> None:
+        """Restore live weights after inference."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name in self._backup:
+                param.data.copy_(self._backup[name])
+        self._backup = {}
+
+    class _ShadowContext:
+        def __init__(self, ema: "EMA"):
+            self._ema = ema
+
+        def __enter__(self):
+            self._ema.apply_shadow()
+            return self
+
+        def __exit__(self, *args):
+            self._ema.restore()
+
+    def average_parameters(self) -> "_ShadowContext":
+        """Context manager: temporarily swap in EMA weights."""
+        return self._ShadowContext(self)
 
 
 # ---------------------------------------------------------------------------
@@ -107,16 +181,20 @@ def save_checkpoint(
     opt_D: torch.optim.Optimizer,
     metrics: dict,
     path: str,
+    ema: EMA | None = None,
 ) -> None:
-    torch.save({
-        "epoch":          epoch,
-        "gat":            gat.state_dict(),
-        "generator":      generator.state_dict(),
-        "critic":         critic.state_dict(),
-        "opt_G":          opt_G.state_dict(),
-        "opt_D":          opt_D.state_dict(),
-        "metrics":        metrics,
-    }, path)
+    payload = {
+        "epoch":     epoch,
+        "gat":       gat.state_dict(),
+        "generator": generator.state_dict(),
+        "critic":    critic.state_dict(),
+        "opt_G":     opt_G.state_dict(),
+        "opt_D":     opt_D.state_dict(),
+        "metrics":   metrics,
+    }
+    if ema is not None:
+        payload["ema_shadow"] = ema.shadow
+    torch.save(payload, path)
     logger.info(f"Checkpoint saved → {path}")
 
 
@@ -128,6 +206,7 @@ def load_checkpoint(
     opt_G: torch.optim.Optimizer,
     opt_D: torch.optim.Optimizer,
     device: torch.device,
+    ema: EMA | None = None,
 ) -> int:
     ckpt = torch.load(path, map_location=device)
     gat.load_state_dict(ckpt["gat"])
@@ -135,6 +214,8 @@ def load_checkpoint(
     critic.load_state_dict(ckpt["critic"])
     opt_G.load_state_dict(ckpt["opt_G"])
     opt_D.load_state_dict(ckpt["opt_D"])
+    if ema is not None and "ema_shadow" in ckpt:
+        ema.shadow = ckpt["ema_shadow"]
     logger.info(f"Resumed from checkpoint {path} (epoch {ckpt['epoch']})")
     return ckpt["epoch"]
 
@@ -153,14 +234,16 @@ def train_epoch(
     cfg: dict,
     device: torch.device,
     tracker: MetricTracker,
+    ema: EMA | None = None,
 ) -> None:
     gat.train()
     generator.train()
     critic.train()
 
-    noise_dim    = cfg["model"]["gan"]["noise_dim"]
-    n_critic     = cfg["model"]["gan"]["n_critic_steps"]
-    gp_lambda    = cfg["model"]["gan"]["gp_lambda"]
+    noise_dim  = cfg["model"]["gan"]["noise_dim"]
+    n_critic   = cfg["model"]["gan"]["n_critic_steps"]
+    gp_lambda  = cfg["model"]["gan"]["gp_lambda"]
+    grad_clip  = cfg["model"]["gan"].get("grad_clip", 0.0)   # 0 = disabled
 
     for batch in loader:
         X      = batch["X"].to(device)   # [B, N, d]
@@ -189,6 +272,8 @@ def train_epoch(
 
             opt_D.zero_grad()
             loss_D.backward()
+            if grad_clip > 0:
+                nn.utils.clip_grad_norm_(critic.parameters(), max_norm=grad_clip)
             opt_D.step()
 
             tracker.update(
@@ -209,7 +294,16 @@ def train_epoch(
 
         opt_G.zero_grad()
         loss_G.backward()
+        if grad_clip > 0:
+            nn.utils.clip_grad_norm_(
+                list(gat.parameters()) + list(generator.parameters()),
+                max_norm=grad_clip,
+            )
         opt_G.step()
+
+        # Update EMA after generator step
+        if ema is not None:
+            ema.update()
 
         tracker.update(loss_G=loss_G)
 
@@ -226,6 +320,7 @@ def validate(
     loader: torch.utils.data.DataLoader,
     cfg: dict,
     device: torch.device,
+    ema: EMA | None = None,
 ) -> dict:
     gat.eval()
     generator.eval()
@@ -234,26 +329,35 @@ def validate(
     noise_dim = cfg["model"]["gan"]["noise_dim"]
     tracker   = MetricTracker()
 
-    for batch in loader:
-        X      = batch["X"].to(device)
-        A      = batch["A"].to(device)
-        C_real = batch["C"].to(device)
-        B      = X.shape[0]
+    # Use EMA weights for validation if available
+    ctx = ema.average_parameters() if ema is not None else _null_context()
+    with ctx:
+        for batch in loader:
+            X      = batch["X"].to(device)
+            A      = batch["A"].to(device)
+            C_real = batch["C"].to(device)
+            B      = X.shape[0]
 
-        _, g, _ = gat(X, A)
-        noise   = torch.randn(B, noise_dim, device=device)
-        C_fake, _ = generator(noise, g)
+            _, g, _ = gat(X, A)
+            noise   = torch.randn(B, noise_dim, device=device)
+            C_fake, _ = generator(noise, g)
 
-        score_real = critic(C_real, g)
-        score_fake = critic(C_fake, g)
+            score_real = critic(C_real, g)
+            score_fake = critic(C_fake, g)
 
-        tracker.update(
-            val_wasserstein = score_real.mean() - score_fake.mean(),
-            val_score_real  = score_real.mean(),
-            val_score_fake  = score_fake.mean(),
-        )
+            tracker.update(
+                val_wasserstein = score_real.mean() - score_fake.mean(),
+                val_score_real  = score_real.mean(),
+                val_score_fake  = score_fake.mean(),
+            )
 
     return tracker.summary()
+
+
+class _null_context:
+    """No-op context manager used when EMA is disabled."""
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +415,26 @@ def train(config_path: str, resume: str | None = None) -> None:
         lr=gcfg["lr"], betas=(gcfg["beta1"], gcfg["beta2"]),
     )
 
+    # ── LR Schedulers ─────────────────────────────────────────────────────
+    epochs       = gcfg["epochs"]
+    lr_scheduler = gcfg.get("lr_scheduler", "none")
+    sched_G = sched_D = None
+    if lr_scheduler == "cosine":
+        sched_G = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt_G, T_max=epochs, eta_min=1e-6
+        )
+        sched_D = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt_D, T_max=epochs, eta_min=1e-6
+        )
+        logger.info("CosineAnnealingLR schedulers enabled.")
+
+    # ── EMA ───────────────────────────────────────────────────────────────
+    use_ema = gcfg.get("use_ema", False)
+    ema_decay = gcfg.get("ema_decay", 0.999)
+    ema = EMA(generator, decay=ema_decay) if use_ema else None
+    if use_ema:
+        logger.info(f"EMA enabled (decay={ema_decay}).")
+
     # ── Resume ────────────────────────────────────────────────────────────
     start_epoch = 0
     ckpt_dir    = Path("results/checkpoints")
@@ -318,16 +442,15 @@ def train(config_path: str, resume: str | None = None) -> None:
 
     if resume:
         start_epoch = load_checkpoint(
-            resume, gat, generator, critic, opt_G, opt_D, device
+            resume, gat, generator, critic, opt_G, opt_D, device, ema
         )
 
     # ── Training ──────────────────────────────────────────────────────────
-    epochs      = gcfg["epochs"]
-    log_every   = max(1, epochs // 20)    # log ~20 times
-    save_every  = max(1, epochs // 5)     # save 5 checkpoints
+    log_every  = max(1, epochs // 20)    # log ~20 times
+    save_every = max(1, epochs // 5)     # save 5 checkpoints
 
-    best_val_w  = float("-inf")
-    history     = {"train": [], "val": []}
+    best_val_w = float("-inf")
+    history    = {"train": [], "val": []}
 
     logger.info(f"Starting training for {epochs} epochs...")
 
@@ -338,24 +461,31 @@ def train(config_path: str, resume: str | None = None) -> None:
         train_epoch(
             gat, generator, critic,
             train_loader, opt_G, opt_D,
-            cfg, device, tracker,
+            cfg, device, tracker, ema,
         )
 
         train_metrics = tracker.summary()
-        val_metrics   = validate(gat, generator, critic, val_loader, cfg, device)
+        val_metrics   = validate(gat, generator, critic, val_loader, cfg, device, ema)
 
         history["train"].append(train_metrics)
         history["val"].append(val_metrics)
 
+        # Step LR schedulers
+        if sched_G is not None:
+            sched_G.step()
+            sched_D.step()
+
         # Log
         if (epoch + 1) % log_every == 0 or epoch == 0:
             elapsed = time.time() - t0
+            lr_now  = opt_G.param_groups[0]["lr"]
             logger.info(
                 f"Epoch {epoch+1:4d}/{epochs} | "
                 f"L_D={train_metrics.get('loss_D', float('nan')):.4f} | "
                 f"L_G={train_metrics.get('loss_G', float('nan')):.4f} | "
                 f"W={train_metrics.get('wasserstein', float('nan')):.4f} | "
                 f"val_W={val_metrics.get('val_wasserstein', float('nan')):.4f} | "
+                f"lr={lr_now:.2e} | "
                 f"{elapsed:.1f}s"
             )
 
@@ -367,6 +497,7 @@ def train(config_path: str, resume: str | None = None) -> None:
                 epoch+1, gat, generator, critic, opt_G, opt_D,
                 {**train_metrics, **val_metrics},
                 str(ckpt_dir / "best.pt"),
+                ema=ema,
             )
 
         # Periodic checkpoint
@@ -375,6 +506,7 @@ def train(config_path: str, resume: str | None = None) -> None:
                 epoch+1, gat, generator, critic, opt_G, opt_D,
                 {**train_metrics, **val_metrics},
                 str(ckpt_dir / f"epoch_{epoch+1:04d}.pt"),
+                ema=ema,
             )
 
     # Final save
@@ -382,6 +514,7 @@ def train(config_path: str, resume: str | None = None) -> None:
         epochs, gat, generator, critic, opt_G, opt_D,
         history["val"][-1] if history["val"] else {},
         str(ckpt_dir / "final.pt"),
+        ema=ema,
     )
 
     # Save training history

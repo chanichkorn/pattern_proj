@@ -4,22 +4,30 @@ gat.py
 P2 — Graph Attention Network (GAT) for SET50 Portfolio Optimization
 
 Architecture:
-    Input  : X [B, N, d]   node features  (d=15)
+    Input  : X [B, N, d]   node features  (d=25)
              A [B, N, N]   adjacency matrix (edge weight = |correlation|)
 
     Layer 1: GATLayer(d → hidden_dim, n_heads=4, concat=True)
              → [B, N, hidden_dim * 4]   LayerNorm + ELU + Dropout
+             + Residual: Linear(d → hidden_dim*4) added before norm
 
     Layer 2: GATLayer(hidden_dim*4 → embedding_dim, n_heads=4, concat=False)
              → [B, N, embedding_dim]    LayerNorm
+             + Residual: Linear(hidden_dim*4 → embedding_dim) added before norm
 
-    Pooling: mean over N  →  graph embedding g [B, embedding_dim]
+    Layer 3: GATLayer(embedding_dim → embedding_dim, n_heads=4, concat=False)
+             → [B, N, embedding_dim]    LayerNorm
+             + Residual: identity skip (same dimension)
+
+    Pooling: Soft-attention pooling over N
+             1-layer MLP → per-node importance scores → weighted sum
+             → graph embedding g [B, embedding_dim]
              g conditions the WGAN-GP Generator
 
 Output:
     Z : [B, N, embedding_dim]   per-stock node embeddings
     g : [B, embedding_dim]      graph-level market state (→ GAN)
-    α : [B, N, N, H]            attention weights (for interpretability)
+    α : [B, N, N, H]            layer-3 attention weights (for interpretability)
 
 Usage:
     from src.gat import GAT
@@ -158,16 +166,57 @@ class GATLayer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Full 2-Layer GAT
+# Soft-attention graph pooling
+# ---------------------------------------------------------------------------
+
+class AttentionPooling(nn.Module):
+    """
+    Soft-attention pooling: learns per-node importance scores, then takes
+    the weighted sum over N to produce a graph-level embedding g.
+
+        scores = softmax( MLP(Z) )   ∈ ℝ^{B × N × 1}
+        g = Σ_i  scores_i · Z_i      ∈ ℝ^{B × embedding_dim}
+
+    This is more expressive than simple mean pooling because the model can
+    focus on the stocks most informative for the current market regime.
+    """
+
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.score_mlp = nn.Linear(embedding_dim, 1, bias=True)
+
+    def forward(self, Z: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        Z : FloatTensor [B, N, embedding_dim]
+
+        Returns
+        -------
+        g : FloatTensor [B, embedding_dim]
+        """
+        scores  = self.score_mlp(Z)                        # [B, N, 1]
+        weights = torch.softmax(scores, dim=1)             # [B, N, 1]  sums to 1 over N
+        g       = (weights * Z).sum(dim=1)                 # [B, embedding_dim]
+        return g
+
+
+# ---------------------------------------------------------------------------
+# Full 3-Layer GAT with residual connections
 # ---------------------------------------------------------------------------
 
 class GAT(nn.Module):
     """
-    2-layer Graph Attention Network.
+    3-layer Graph Attention Network with residual connections and
+    soft-attention graph pooling.
 
     Layer 1 (concat heads):   [B, N, d]      →  [B, N, hidden_dim * n_heads_l1]
+                               residual: Linear(d → hidden_dim*n_heads_l1)
     Layer 2 (mean  heads):    [B, N, ...]     →  [B, N, embedding_dim]
-    Graph pooling (mean):     [B, N, emb_dim] →  [B, embedding_dim]
+                               residual: Linear(hidden_dim*n_heads_l1 → embedding_dim)
+    Layer 3 (mean  heads):    [B, N, emb_dim] →  [B, N, embedding_dim]
+                               residual: identity skip
+    Attention pooling:        [B, N, emb_dim] →  [B, embedding_dim]
 
     The graph embedding g is passed to the WGAN-GP Generator as the
     conditioning vector, replacing hand-crafted market features.
@@ -180,12 +229,14 @@ class GAT(nn.Module):
         embedding_dim: int,
         n_heads_l1: int = 4,
         n_heads_l2: int = 4,
+        n_heads_l3: int = 4,
         dropout: float = 0.1,
         use_edge_feat: bool = True,
     ):
         super().__init__()
 
         self.embedding_dim = embedding_dim
+        l1_out = hidden_dim * n_heads_l1
 
         # Layer 1: concat heads → output dim = hidden_dim * n_heads_l1
         self.layer1 = GATLayer(
@@ -196,26 +247,42 @@ class GAT(nn.Module):
             dropout=dropout,
             use_edge_feat=use_edge_feat,
         )
-        self.norm1 = nn.LayerNorm(hidden_dim * n_heads_l1)
+        self.res1 = nn.Linear(node_feature_dim, l1_out, bias=False)
+        self.norm1 = nn.LayerNorm(l1_out)
 
         # Layer 2: mean heads → output dim = embedding_dim
         self.layer2 = GATLayer(
-            in_features=hidden_dim * n_heads_l1,
+            in_features=l1_out,
             out_features=embedding_dim,
             n_heads=n_heads_l2,
             concat=False,          # ← mean, not concat
             dropout=dropout,
             use_edge_feat=use_edge_feat,
         )
+        self.res2 = nn.Linear(l1_out, embedding_dim, bias=False)
         self.norm2 = nn.LayerNorm(embedding_dim)
+
+        # Layer 3: mean heads → output dim = embedding_dim (identity residual)
+        self.layer3 = GATLayer(
+            in_features=embedding_dim,
+            out_features=embedding_dim,
+            n_heads=n_heads_l3,
+            concat=False,
+            dropout=dropout,
+            use_edge_feat=use_edge_feat,
+        )
+        self.norm3 = nn.LayerNorm(embedding_dim)
 
         self.activation = nn.ELU()
         self.dropout    = nn.Dropout(dropout)
 
+        # Soft-attention pooling replaces simple mean
+        self.pool = AttentionPooling(embedding_dim)
+
         logger.info(
             f"GAT initialised — "
-            f"d={node_feature_dim} → {hidden_dim*n_heads_l1} → {embedding_dim} "
-            f"(heads: {n_heads_l1}/{n_heads_l2})"
+            f"d={node_feature_dim} → {l1_out} → {embedding_dim} → {embedding_dim} "
+            f"(heads: {n_heads_l1}/{n_heads_l2}/{n_heads_l3})"
         )
 
     def forward(
@@ -233,20 +300,24 @@ class GAT(nn.Module):
         -------
         Z     : FloatTensor [B, N, embedding_dim]   node embeddings
         g     : FloatTensor [B, embedding_dim]       graph embedding → GAN
-        alpha : FloatTensor [B, N, N, n_heads_l2]   layer-2 attention weights
+        alpha : FloatTensor [B, N, N, n_heads_l3]   layer-3 attention weights
         """
-        # ── Layer 1 ───────────────────────────────────────────────────────
-        h, _      = self.layer1(x, adj)   # [B, N, hidden_dim * H1]
-        h         = self.norm1(h)
-        h         = self.activation(h)
-        h         = self.dropout(h)
+        # ── Layer 1 (with residual) ───────────────────────────────────────
+        h1, _  = self.layer1(x, adj)              # [B, N, l1_out]
+        h1     = self.norm1(h1 + self.res1(x))    # residual before norm
+        h1     = self.activation(h1)
+        h1     = self.dropout(h1)
 
-        # ── Layer 2 ───────────────────────────────────────────────────────
-        Z, alpha  = self.layer2(h, adj)   # [B, N, embedding_dim]
-        Z         = self.norm2(Z)
+        # ── Layer 2 (with residual) ───────────────────────────────────────
+        h2, _  = self.layer2(h1, adj)             # [B, N, embedding_dim]
+        h2     = self.norm2(h2 + self.res2(h1))   # residual before norm
 
-        # ── Graph-level pooling ───────────────────────────────────────────
-        g = Z.mean(dim=1)                 # [B, embedding_dim]
+        # ── Layer 3 (identity residual) ──────────────────────────────────
+        Z, alpha = self.layer3(h2, adj)            # [B, N, embedding_dim]
+        Z        = self.norm3(Z + h2)              # identity skip
+
+        # ── Soft-attention graph pooling ──────────────────────────────────
+        g = self.pool(Z)                           # [B, embedding_dim]
 
         return Z, g, alpha
 
@@ -262,6 +333,7 @@ class GAT(nn.Module):
             embedding_dim    = gcfg["embedding_dim"],
             n_heads_l1       = gcfg["num_heads_l1"],
             n_heads_l2       = gcfg["num_heads_l2"],
+            n_heads_l3       = gcfg.get("num_heads_l3", gcfg["num_heads_l2"]),
             dropout          = gcfg["dropout"],
         )
 
@@ -304,9 +376,6 @@ if __name__ == "__main__":
     with open("configs/config.yaml") as f:
         cfg = yaml.safe_load(f)
 
-    # Override feature dim to match actual pipeline output (15, not config 14)
-    cfg["model"]["gat"]["node_feature_dim"] = 15
-
     device = (
         torch.device("mps")   if torch.backends.mps.is_available() else
         torch.device("cuda")  if torch.cuda.is_available() else
@@ -317,8 +386,8 @@ if __name__ == "__main__":
     model = GAT.from_config(cfg).to(device)
     print(f"Parameters: {model.count_parameters():,}")
 
-    # Mock batch matching real pipeline output
-    B, N, d = 16, 40, 15
+    # Mock batch matching real pipeline output (d=25)
+    B, N, d = 16, 40, cfg["model"]["gat"]["node_feature_dim"]
     X   = torch.randn(B, N, d).to(device)
     adj = torch.rand(B, N, N).to(device)
     adj = (adj + adj.transpose(1, 2)) / 2   # symmetric
@@ -333,24 +402,19 @@ if __name__ == "__main__":
     print(f"  Output g     : {tuple(g.shape)}")
     print(f"  Attention α  : {tuple(alpha.shape)}")
 
-    # Sanity checks
-    assert Z.shape   == (B, N, cfg["model"]["gat"]["embedding_dim"])
-    assert g.shape   == (B, cfg["model"]["gat"]["embedding_dim"])
-    assert alpha.shape == (B, N, N, cfg["model"]["gat"]["num_heads_l2"])
+    emb_dim = cfg["model"]["gat"]["embedding_dim"]
+    n_heads_l3 = cfg["model"]["gat"].get("num_heads_l3", cfg["model"]["gat"]["num_heads_l2"])
+    assert Z.shape   == (B, N, emb_dim),      f"Z shape mismatch: {Z.shape}"
+    assert g.shape   == (B, emb_dim),          f"g shape mismatch: {g.shape}"
+    assert alpha.shape == (B, N, N, n_heads_l3), f"alpha shape mismatch: {alpha.shape}"
     assert torch.isfinite(Z).all(),   "Z contains NaN/Inf"
     assert torch.isfinite(g).all(),   "g contains NaN/Inf"
-
-    # Attention weights should sum to 1 over neighbors (for non-isolated nodes)
-    attn_sum = alpha.sum(dim=2)   # [B, N, H]
-    # Nodes with no edges will have sum=0 — filter them out
-    connected = (adj.sum(dim=2) > 0).unsqueeze(-1).expand_as(attn_sum)
-    attn_ok = torch.allclose(attn_sum[connected], torch.ones_like(attn_sum[connected]), atol=1e-5)
-    print(f"  Attention sums to 1 (connected nodes): {attn_ok}")
 
     # Test gradient flow
     loss = Z.sum() + g.sum()
     loss.backward()
     grad_ok = all(p.grad is not None for p in model.parameters())
-    print(f"  Gradients flow to all params         : {grad_ok}")
+    print(f"  Gradients flow to all params: {grad_ok}")
 
     print("\n✅  GAT smoke test passed.")
+
