@@ -1,0 +1,6 @@
+Strategy,Ann. Return (%),Ann. Vol (%),Sharpe Ratio,Max Drawdown (%),Avg Turnover,Total Return (%)
+DCC-GARCH GMV,-19.26,9.75,-1.975,-17.15,0.0189,-13.22
+Sample Cov GMV,-10.27,9.64,-1.065,-11.85,0.0086,-6.93
+Equal Weight (1/N),-8.4,12.55,-0.67,-12.18,0.0,-5.65
+V0,-11.16,10.53,-1.06,-11.33,0.0275,-7.54
+V1,-0.17,10.04,-0.017,-14.61,0.0189,-0.34
