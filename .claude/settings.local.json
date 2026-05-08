@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda env *)",
+      "Read(//Users/chakattraisookkongwaree/miniforge3/**)",
+      "Read(//Users/chakattraisookkongwaree/anaconda3/**)",
+      "Read(//Users/chakattraisookkongwaree/miniconda3/**)"
+    ]
+  }
+}

@@ -10,6 +10,7 @@ data:
 
   # Rolling window for correlation & features (trading days)
   window: 21
+  long_window: 63          # slow regime features (63d return + vol)
 
   # Minimum fraction of valid data required per stock
   min_valid_fraction: 0.90
@@ -127,7 +128,7 @@ graph:
 
 model:
   gat:
-    node_feature_dim: 15     # 4 numeric + 11 sector one-hot
+    node_feature_dim: 17     # 6 numeric + 11 sector one-hot
     hidden_dim: 64
     embedding_dim: 32
     num_heads_l1: 4
@@ -138,6 +139,9 @@ model:
     noise_dim: 128
     condition_dim: 32        # = gat.embedding_dim (graph-level pooling)
     hidden_dim: 512
+    n_factors: 8             # factor model rank K; output = N*K + N params (360 vs 820 Cholesky)
+    warmup_epochs: 30        # epochs critic trains alone before generator starts
+    lambda_frob: 0.1         # weight of auxiliary Frobenius loss on generator
     n_critic_steps: 5
     gp_lambda: 10
     lr: 0.0001

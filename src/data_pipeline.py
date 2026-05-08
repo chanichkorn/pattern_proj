@@ -212,23 +212,27 @@ def build_node_features(
     t: int,
     window: int,
     sector_map: dict[str, str],
+    long_window: int = 63,
 ) -> np.ndarray:
     """
     Build node feature matrix X_t for window ending at index t.
 
-    Features per stock (d = 4 numeric + len(SECTOR_LIST) sector one-hot):
+    Features per stock (d = 6 numeric + len(SECTOR_LIST) sector one-hot):
         [0]  5-day return           (short momentum)
         [1]  21-day return          (medium momentum)
-        [2]  realized volatility    (std of returns in window)
+        [2]  21-day realized vol    (std of returns in 21d window)
         [3]  volume z-score         (set to 0 if volume not available)
-        [4:] sector one-hot
+        [4]  63-day return          (slow momentum / regime signal)
+        [5]  63-day realized vol    (slow volatility regime)
+        [6:] sector one-hot
 
     Parameters
     ----------
-    returns : pd.DataFrame  [dates × tickers]
-    t       : int           end index of current window (exclusive)
-    window  : int           look-back window length
-    sector_map : dict       ticker → sector string
+    returns     : pd.DataFrame  [dates × tickers]
+    t           : int           end index of current window (exclusive)
+    window      : int           short look-back (21d)
+    sector_map  : dict          ticker → sector string
+    long_window : int           long look-back for regime features (63d)
 
     Returns
     -------
@@ -236,24 +240,24 @@ def build_node_features(
     """
     tickers = returns.columns.tolist()
     N = len(tickers)
-    window_returns = returns.iloc[t - window : t]  # [window × N]
+    window_returns      = returns.iloc[t - window : t]           # [21d × N]
+    long_window_returns = returns.iloc[max(0, t - long_window) : t]  # [≤63d × N]
 
-    n_numeric = 4
+    n_numeric = 6
     d = n_numeric + len(SECTOR_LIST)
     X = np.zeros((N, d), dtype=np.float32)
 
     for i, ticker in enumerate(tickers):
-        r = window_returns[ticker].values  # [window]
+        r      = window_returns[ticker].values       # 21d
+        r_long = long_window_returns[ticker].values  # up to 63d
 
         # --- numeric features ---
-        # 5-day return
-        X[i, 0] = r[-5:].sum() if len(r) >= 5 else r.sum()
-        # 21-day return (full window)
-        X[i, 1] = r.sum()
-        # Realized volatility
-        X[i, 2] = r.std()
-        # Volume z-score placeholder (0 until volume data added)
-        X[i, 3] = 0.0
+        X[i, 0] = r[-5:].sum() if len(r) >= 5 else r.sum()          # 5d return
+        X[i, 1] = r.sum()                                             # 21d return
+        X[i, 2] = r.std()                                             # 21d vol
+        X[i, 3] = 0.0                                                 # volume placeholder
+        X[i, 4] = r_long.sum() if len(r_long) > 0 else 0.0          # 63d return
+        X[i, 5] = r_long.std() if len(r_long) > 1 else 0.0          # 63d vol
 
         # --- sector one-hot ---
         sector = sector_map.get(ticker, "")
@@ -366,18 +370,19 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
     logger.info("Saved prices and returns to parquet.")
 
     # ── 4. Rolling windows ────────────────────────────────────────────────
-    window = cfg["data"]["window"]
-    sector_map = cfg["data"]["sector_map"]
-    threshold = cfg["graph"]["threshold"]
-    abs_corr = cfg["graph"]["abs_correlation"]
+    window      = cfg["data"]["window"]
+    long_window = cfg["data"].get("long_window", 63)
+    sector_map  = cfg["data"]["sector_map"]
+    threshold   = cfg["graph"]["threshold"]
+    abs_corr    = cfg["graph"]["abs_correlation"]
 
     T = len(returns)
     n_windows = T - window  # first usable t = window
 
-    # Compute feature dim dynamically: 4 numeric + len(SECTOR_LIST) one-hot
-    feature_dim = 4 + len(SECTOR_LIST)
+    # 6 numeric (5d, 21d, 21d-vol, vol-placeholder, 63d, 63d-vol) + sector one-hot
+    feature_dim = 6 + len(SECTOR_LIST)
 
-    logger.info(f"Generating {n_windows} rolling windows (T={window}, d={feature_dim})...")
+    logger.info(f"Generating {n_windows} rolling windows (T={window}, long={long_window}, d={feature_dim})...")
 
     all_X = np.zeros((n_windows, N, feature_dim), dtype=np.float32)  # node features
     all_A = np.zeros((n_windows, N, N), dtype=np.float32)            # adjacency
@@ -385,7 +390,7 @@ def run_pipeline(config_path: str, force_refresh: bool = False) -> dict:
 
     for idx, t in enumerate(tqdm(range(window, T), desc="Rolling windows")):
         C = build_correlation_matrix(returns, t, window)
-        X = build_node_features(returns, t, window, sector_map)
+        X = build_node_features(returns, t, window, sector_map, long_window)
         A = build_adjacency_matrix(C, threshold, abs_corr)
 
         all_C[idx] = C

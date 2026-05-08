@@ -153,6 +153,7 @@ def train_epoch(
     cfg: dict,
     device: torch.device,
     tracker: MetricTracker,
+    generator_step: bool = True,
 ) -> None:
     gat.train()
     generator.train()
@@ -198,20 +199,24 @@ def train_epoch(
             )
 
         # ═══════════════════════════════════════════════════════════════════
-        # GENERATOR + GAT STEP
+        # GENERATOR + GAT STEP  (skipped during critic warm-up)
         # ═══════════════════════════════════════════════════════════════════
-        # Full forward through GAT (with grad) so GAT weights update too
-        _, g, _ = gat(X, A)
-        noise   = torch.randn(B, noise_dim, device=device)
-        C_fake, _ = generator(noise, g)
+        if generator_step:
+            # Full forward through GAT (with grad) so GAT weights update too
+            _, g, _ = gat(X, A)
+            noise   = torch.randn(B, noise_dim, device=device)
+            C_fake, _ = generator(noise, g)
 
-        loss_G  = -critic(C_fake, g).mean()
+            lambda_frob = cfg["model"]["gan"]["lambda_frob"]
+            loss_adv  = -critic(C_fake, g).mean()
+            loss_frob = ((C_fake - C_real) ** 2).mean()   # per-element MSE
+            loss_G    = loss_adv + lambda_frob * loss_frob
 
-        opt_G.zero_grad()
-        loss_G.backward()
-        opt_G.step()
+            opt_G.zero_grad()
+            loss_G.backward()
+            opt_G.step()
 
-        tracker.update(loss_G=loss_G)
+            tracker.update(loss_G=loss_G, loss_frob=loss_frob)
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +252,13 @@ def validate(
         score_real = critic(C_real, g)
         score_fake = critic(C_fake, g)
 
+        frob = ((C_fake - C_real) ** 2).mean()
+
         tracker.update(
             val_wasserstein = score_real.mean() - score_fake.mean(),
             val_score_real  = score_real.mean(),
             val_score_fake  = score_fake.mean(),
+            val_frobenius   = frob,
         )
 
     return tracker.summary()
@@ -326,8 +334,26 @@ def train(config_path: str, resume: str | None = None) -> None:
     log_every   = max(1, epochs // 20)    # log ~20 times
     save_every  = max(1, epochs // 5)     # save 5 checkpoints
 
-    best_val_w  = float("-inf")
-    history     = {"train": [], "val": []}
+    best_val_frob = float("inf")
+    history       = {"train": [], "val": []}
+
+    # ── Critic warm-up (critic-only, no generator updates) ────────────────
+    warmup_epochs = gcfg.get("warmup_epochs", 0)
+    if warmup_epochs > 0:
+        logger.info(f"Critic warm-up for {warmup_epochs} epochs...")
+        for wu_epoch in range(warmup_epochs):
+            wu_tracker = MetricTracker()
+            train_epoch(
+                gat, generator, critic,
+                train_loader, opt_G, opt_D,
+                cfg, device, wu_tracker,
+                generator_step=False,
+            )
+            if (wu_epoch + 1) % max(1, warmup_epochs // 5) == 0:
+                logger.info(
+                    f"  Warmup {wu_epoch+1:3d}/{warmup_epochs} | "
+                    f"L_D={wu_tracker.mean('loss_D'):.4f}"
+                )
 
     logger.info(f"Starting training for {epochs} epochs...")
 
@@ -355,14 +381,15 @@ def train(config_path: str, resume: str | None = None) -> None:
                 f"L_D={train_metrics.get('loss_D', float('nan')):.4f} | "
                 f"L_G={train_metrics.get('loss_G', float('nan')):.4f} | "
                 f"W={train_metrics.get('wasserstein', float('nan')):.4f} | "
-                f"val_W={val_metrics.get('val_wasserstein', float('nan')):.4f} | "
+                f"frob={train_metrics.get('loss_frob', float('nan')):.4f} | "
+                f"val_frob={val_metrics.get('val_frobenius', float('nan')):.4f} | "
                 f"{elapsed:.1f}s"
             )
 
-        # Save best model
-        val_w = val_metrics.get("val_wasserstein", float("-inf"))
-        if val_w > best_val_w:
-            best_val_w = val_w
+        # Save best model — minimise val Frobenius (Critic-independent metric)
+        val_frob = val_metrics.get("val_frobenius", float("inf"))
+        if val_frob < best_val_frob:
+            best_val_frob = val_frob
             save_checkpoint(
                 epoch+1, gat, generator, critic, opt_G, opt_D,
                 {**train_metrics, **val_metrics},
@@ -389,7 +416,7 @@ def train(config_path: str, resume: str | None = None) -> None:
     results_dir.mkdir(exist_ok=True)
     np.save(str(results_dir / "training_history.npy"), history)
     logger.info("Training complete.")
-    logger.info(f"Best val Wasserstein distance: {best_val_w:.4f}")
+    logger.info(f"Best val Frobenius distance: {best_val_frob:.4f}")
 
 
 # ---------------------------------------------------------------------------

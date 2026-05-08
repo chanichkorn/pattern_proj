@@ -34,6 +34,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +104,70 @@ def vec_to_cholesky(v: torch.Tensor, N: int) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
+# Factor model → Correlation (replaces Cholesky in the Generator)
+# ---------------------------------------------------------------------------
+
+def factor_to_correlation(
+    v: torch.Tensor,
+    N: int,
+    K: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert flat MLP output to a PSD correlation matrix via a factor model.
+
+    Parameterisation
+    ----------------
+    v[:, :N*K]  → factor loadings  Λ  [B, N, K]
+    v[:, N*K:]  → idiosyncratic    d  [B, N]  (Softplus → positive)
+
+    Covariance:  Σ = Λ Λᵀ + diag(d)          (PSD by construction)
+    Correlation: R_ij = Σ_ij / sqrt(Σ_ii Σ_jj)
+
+    Advantages over Cholesky
+    ------------------------
+    • N*K + N free parameters vs N*(N+1)//2  (360 vs 820 for N=40, K=8)
+    • Λ is interpretable: column k is a latent market factor
+    • The rank-K structure regularises the matrix toward factor solutions
+      that generalise better out-of-sample
+
+    Parameters
+    ----------
+    v : FloatTensor [B, N*K + N]   raw MLP output
+    N : int                        number of stocks
+    K : int                        number of latent factors
+
+    Returns
+    -------
+    R      : FloatTensor [B, N, N]   PSD correlation matrix (diag = 1)
+    Lambda : FloatTensor [B, N, K]   factor loadings (for diagnostics)
+    """
+    B = v.shape[0]
+    Lambda = v[:, : N * K].view(B, N, K)           # [B, N, K]
+    d      = F.softplus(v[:, N * K :])             # [B, N]  positive idiosyncratic var
+
+    Sigma  = torch.bmm(Lambda, Lambda.transpose(1, 2))  # [B, N, N]
+    Sigma  = Sigma + torch.diag_embed(d)                 # add idiosyncratic diagonal
+
+    # Normalise to correlation
+    diag  = torch.diagonal(Sigma, dim1=1, dim2=2).clamp(min=1e-8)  # [B, N]
+    std   = torch.sqrt(diag)                                         # [B, N]
+    outer = torch.bmm(std.unsqueeze(2), std.unsqueeze(1))           # [B, N, N]
+    R     = Sigma / outer
+
+    R = R.clamp(-1.0, 1.0)
+    eye = torch.eye(N, device=R.device, dtype=R.dtype).unsqueeze(0)
+    R   = R * (1 - eye) + eye                        # exact diagonal = 1
+
+    return R, Lambda
+
+
+# ---------------------------------------------------------------------------
 # Generator
 # ---------------------------------------------------------------------------
 
 class Generator(nn.Module):
     """
-    MLP Generator: (noise ‖ graph_embedding) → Cholesky → Correlation matrix.
+    MLP Generator: (noise ‖ graph_embedding) → factor model → Correlation matrix.
 
     Architecture
     ------------
@@ -116,9 +175,9 @@ class Generator(nn.Module):
     Linear(in  → hidden)  + LayerNorm + LeakyReLU
     Linear(hidden → hidden*2) + LayerNorm + LeakyReLU
     Linear(hidden*2 → hidden) + LayerNorm + LeakyReLU
-    Linear(hidden → N*(N+1)//2)             ← Cholesky entries
-    → vec_to_cholesky → cholesky_to_correlation
-    Output : R̂  [B, N, N]   valid correlation matrix
+    Linear(hidden → N*K + N)              ← factor loadings Λ + idiosyncratic d
+    → factor_to_correlation  (Σ = ΛΛᵀ + diag(d), normalise → R)
+    Output : R̂  [B, N, N]   valid PSD correlation matrix
     """
 
     def __init__(
@@ -127,12 +186,15 @@ class Generator(nn.Module):
         noise_dim: int,
         condition_dim: int,
         hidden_dim: int,
+        n_factors: int = 8,
     ):
         super().__init__()
-        self.n_stocks     = n_stocks
-        self.noise_dim    = noise_dim
+        self.n_stocks      = n_stocks
+        self.noise_dim     = noise_dim
         self.condition_dim = condition_dim
-        self.chol_dim     = n_stocks * (n_stocks + 1) // 2
+        self.n_factors     = n_factors
+        # Factor model output: Λ [N×K] entries + idiosyncratic d [N]
+        self.factor_dim    = n_stocks * n_factors + n_stocks
 
         in_dim = noise_dim + condition_dim
 
@@ -152,15 +214,15 @@ class Generator(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.2),
 
-            # Output: Cholesky entries (no activation — handled in vec_to_cholesky)
-            nn.Linear(hidden_dim, self.chol_dim),
+            # Output: factor loadings Λ [N×K] + idiosyncratic d [N]
+            nn.Linear(hidden_dim, self.factor_dim),
         )
 
         self._init_weights()
         logger.info(
-            f"Generator — N={n_stocks}  noise={noise_dim}  "
-            f"cond={condition_dim}  hidden={hidden_dim}  "
-            f"chol_entries={self.chol_dim}  "
+            f"Generator (factor model) — N={n_stocks}  K={n_factors}  "
+            f"noise={noise_dim}  cond={condition_dim}  hidden={hidden_dim}  "
+            f"factor_entries={self.factor_dim}  "
             f"params={self.count_parameters():,}"
         )
 
@@ -184,14 +246,13 @@ class Generator(nn.Module):
 
         Returns
         -------
-        R     : FloatTensor [B, N, N]   generated correlation matrix
-        L     : FloatTensor [B, N, N]   Cholesky factor (for diagnostics)
+        R      : FloatTensor [B, N, N]   generated correlation matrix
+        Lambda : FloatTensor [B, N, K]   factor loadings (for diagnostics)
         """
-        z   = torch.cat([noise, g], dim=1)       # [B, noise_dim + cond_dim]
-        v   = self.net(z)                        # [B, chol_dim]
-        L   = vec_to_cholesky(v, self.n_stocks)  # [B, N, N]
-        R   = cholesky_to_correlation(L)         # [B, N, N]
-        return R, L
+        z          = torch.cat([noise, g], dim=1)                          # [B, noise_dim + cond_dim]
+        v          = self.net(z)                                           # [B, factor_dim]
+        R, Lambda  = factor_to_correlation(v, self.n_stocks, self.n_factors)
+        return R, Lambda
 
     def sample(
         self,
@@ -230,6 +291,7 @@ class Generator(nn.Module):
             noise_dim     = gcfg["noise_dim"],
             condition_dim = cfg["model"]["gat"]["embedding_dim"],
             hidden_dim    = gcfg["hidden_dim"],
+            n_factors     = gcfg.get("n_factors", 8),
         )
 
 
@@ -258,11 +320,11 @@ if __name__ == "__main__":
     noise = torch.randn(B, cfg["model"]["gan"]["noise_dim"]).to(device)
     g     = torch.randn(B, cfg["model"]["gat"]["embedding_dim"]).to(device)
 
-    R, L = G(noise, g)
+    R, Lambda = G(noise, g)
 
     print(f"── Generator output ─────────────────────")
     print(f"  R shape          : {tuple(R.shape)}")
-    print(f"  L shape          : {tuple(L.shape)}")
+    print(f"  Lambda shape     : {tuple(Lambda.shape)}")
 
     # Validity checks
     diag_ok  = torch.allclose(

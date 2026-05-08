@@ -1,0 +1,61 @@
+2026-05-08 15:36:16  INFO      Training on device: mps
+2026-05-08 15:36:16  INFO      Loaded 1109 windows — X(1109, 40, 15) A(1109, 40, 40) C(1109, 40, 40)
+2026-05-08 15:36:16  INFO      Chronological split — train: 776 | val: 166 | test: 167 windows
+2026-05-08 15:36:16  INFO      Pre-computing graph conditioning vectors...
+2026-05-08 15:36:16  INFO      Pre-computing graph conditioning vectors...
+2026-05-08 15:36:16  INFO      Pre-computing graph conditioning vectors...
+2026-05-08 15:36:16  INFO      Feature normalizer fitted and saved.
+2026-05-08 15:36:16  INFO      Dataset ready — N=40, train=776, val=166
+2026-05-08 15:36:16  INFO      GAT initialised — d=15 → 256 → 32 (heads: 4/4)
+2026-05-08 15:36:16  INFO      Generator (factor model) — N=40  K=8  noise=128  cond=32  hidden=512  factor_entries=360  params=1,321,320
+2026-05-08 15:36:16  INFO      Critic — N=40  tri_dim=780  cond=32  hidden=512  params=812,545
+2026-05-08 15:36:16  INFO      GAT params       : 78,912
+2026-05-08 15:36:16  INFO      Generator params : 1,321,320
+2026-05-08 15:36:16  INFO      Critic params    : 812,545
+2026-05-08 15:36:17  INFO      Critic warm-up for 30 epochs...
+/Users/chakattraisookkongwaree/Documents/GitHub/pattern_proj/.venv/lib/python3.12/site-packages/torch/utils/data/dataloader.py:775: UserWarning: 'pin_memory' argument is set as true but not supported on MPS now, device pinned memory won't be used.
+  super().__init__(loader)
+2026-05-08 15:36:31  INFO        Warmup   6/30 | L_D=-7.6542
+2026-05-08 15:36:45  INFO        Warmup  12/30 | L_D=-8.6439
+2026-05-08 15:36:58  INFO        Warmup  18/30 | L_D=-9.3671
+2026-05-08 15:37:11  INFO        Warmup  24/30 | L_D=-9.7896
+2026-05-08 15:37:24  INFO        Warmup  30/30 | L_D=-10.2094
+2026-05-08 15:37:24  INFO      Starting training for 300 epochs...
+2026-05-08 15:37:29  INFO      Epoch    1/300 | L_D=-6.1938 | L_G=-13.3737 | W=7.0954 | frob=0.1355 | val_frob=0.1175 | 5.1s
+2026-05-08 15:37:29  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:37:39  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:37:48  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:38:02  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:38:34  INFO      Epoch   15/300 | L_D=-3.7288 | L_G=-16.1104 | W=4.1769 | frob=0.0788 | val_frob=0.1015 | 4.6s
+2026-05-08 15:38:53  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:39:43  INFO      Epoch   30/300 | L_D=-4.3018 | L_G=-14.2955 | W=4.7920 | frob=0.0752 | val_frob=0.0907 | 4.6s
+2026-05-08 15:40:20  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:40:52  INFO      Epoch   45/300 | L_D=-4.6330 | L_G=-13.0083 | W=5.1665 | frob=0.0713 | val_frob=0.0866 | 4.6s
+2026-05-08 15:42:00  INFO      Epoch   60/300 | L_D=-4.7450 | L_G=-11.7573 | W=5.3273 | frob=0.0659 | val_frob=0.0845 | 4.5s
+2026-05-08 15:42:00  INFO      Checkpoint saved → results/checkpoints/epoch_0060.pt
+2026-05-08 15:42:05  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:42:10  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:42:51  INFO      Checkpoint saved → results/checkpoints/best.pt
+2026-05-08 15:43:10  INFO      Epoch   75/300 | L_D=-4.7785 | L_G=-10.3998 | W=5.3438 | frob=0.0604 | val_frob=0.0798 | 4.5s
+2026-05-08 15:44:18  INFO      Epoch   90/300 | L_D=-4.8543 | L_G=-10.4896 | W=5.4132 | frob=0.0583 | val_frob=0.0763 | 4.5s
+2026-05-08 15:45:26  INFO      Epoch  105/300 | L_D=-4.7829 | L_G=-11.1575 | W=5.3384 | frob=0.0537 | val_frob=0.0876 | 4.6s
+2026-05-08 15:46:35  INFO      Epoch  120/300 | L_D=-4.6660 | L_G=-11.5736 | W=5.1976 | frob=0.0490 | val_frob=0.0835 | 4.6s
+2026-05-08 15:46:35  INFO      Checkpoint saved → results/checkpoints/epoch_0120.pt
+2026-05-08 15:47:44  INFO      Epoch  135/300 | L_D=-4.5332 | L_G=-11.6516 | W=5.0118 | frob=0.0458 | val_frob=0.0870 | 4.5s
+2026-05-08 15:49:03  INFO      Epoch  150/300 | L_D=-4.2882 | L_G=-12.7995 | W=4.7296 | frob=0.0413 | val_frob=0.0827 | 6.3s
+2026-05-08 15:50:30  INFO      Epoch  165/300 | L_D=-4.0775 | L_G=-13.7529 | W=4.4810 | frob=0.0381 | val_frob=0.0844 | 4.8s
+2026-05-08 15:51:40  INFO      Epoch  180/300 | L_D=-3.8961 | L_G=-14.8222 | W=4.2712 | frob=0.0352 | val_frob=0.0815 | 4.5s
+2026-05-08 15:51:40  INFO      Checkpoint saved → results/checkpoints/epoch_0180.pt
+2026-05-08 15:52:48  INFO      Epoch  195/300 | L_D=-3.7552 | L_G=-15.7887 | W=4.0994 | frob=0.0327 | val_frob=0.0826 | 4.5s
+2026-05-08 15:53:58  INFO      Epoch  210/300 | L_D=-3.5149 | L_G=-16.6281 | W=3.8200 | frob=0.0296 | val_frob=0.0848 | 4.8s
+2026-05-08 15:55:08  INFO      Epoch  225/300 | L_D=-3.3500 | L_G=-17.1047 | W=3.6300 | frob=0.0273 | val_frob=0.0850 | 4.7s
+2026-05-08 15:56:19  INFO      Epoch  240/300 | L_D=-3.2071 | L_G=-17.5522 | W=3.4697 | frob=0.0251 | val_frob=0.0883 | 4.7s
+2026-05-08 15:56:19  INFO      Checkpoint saved → results/checkpoints/epoch_0240.pt
+2026-05-08 15:57:30  INFO      Epoch  255/300 | L_D=-3.0745 | L_G=-17.7932 | W=3.3080 | frob=0.0233 | val_frob=0.0885 | 4.7s
+2026-05-08 15:58:41  INFO      Epoch  270/300 | L_D=-2.9887 | L_G=-18.0708 | W=3.2150 | frob=0.0221 | val_frob=0.0884 | 4.7s
+2026-05-08 15:59:51  INFO      Epoch  285/300 | L_D=-2.9036 | L_G=-18.4652 | W=3.1098 | frob=0.0207 | val_frob=0.0850 | 4.7s
+2026-05-08 16:01:02  INFO      Epoch  300/300 | L_D=-2.8478 | L_G=-18.7635 | W=3.0529 | frob=0.0198 | val_frob=0.0804 | 4.7s
+2026-05-08 16:01:02  INFO      Checkpoint saved → results/checkpoints/epoch_0300.pt
+2026-05-08 16:01:02  INFO      Checkpoint saved → results/checkpoints/final.pt
+2026-05-08 16:01:02  INFO      Training complete.
+2026-05-08 16:01:02  INFO      Best val Frobenius distance: 0.0763

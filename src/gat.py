@@ -83,9 +83,12 @@ class GATLayer(nn.Module):
         # Shared linear transform  (no bias — LayerNorm handles offset)
         self.W = nn.Linear(in_features, out_features * n_heads, bias=False)
 
-        # Attention vector per head:  [H, 2F]  or  [H, 2F+1]
+        # GATv2: W_pair projects concatenated pair features before the nonlinearity,
+        # making attention truly dynamic (not decomposable into independent node terms).
+        # attn_dim = 2F + 1 (with edge feat) or 2F; W_pair maps → out_features.
         attn_dim = 2 * out_features + (1 if use_edge_feat else 0)
-        self.attn = nn.Parameter(torch.empty(n_heads, attn_dim))
+        self.W_pair = nn.Parameter(torch.empty(n_heads, attn_dim, out_features))
+        self.attn   = nn.Parameter(torch.empty(n_heads, out_features))
 
         self.leaky_relu = nn.LeakyReLU(negative_slope=negative_slope)
         self.dropout    = nn.Dropout(dropout)
@@ -94,7 +97,8 @@ class GATLayer(nn.Module):
 
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.W.weight, gain=1.414)
-        nn.init.xavier_uniform_(self.attn.unsqueeze(0))   # treat as [1, H, attn_dim]
+        nn.init.xavier_uniform_(self.W_pair.reshape(-1, self.out_features))
+        nn.init.xavier_uniform_(self.attn.unsqueeze(0))
 
     def forward(
         self,
@@ -131,10 +135,14 @@ class GATLayer(nn.Module):
         else:
             pair = torch.cat([h_i, h_j], dim=-1)         # [B, N, N, H, 2Fh]
 
-        # ── Attention scores ──────────────────────────────────────────────
-        attn_vec = self.attn.view(1, 1, 1, H, -1)
-        e = (pair * attn_vec).sum(dim=-1)    # [B, N, N, H]
-        e = self.leaky_relu(e)
+        # ── GATv2 attention: mix h_i and h_j before the nonlinearity ─────
+        # pair [B,N,N,H,attn_dim] × W_pair [H,attn_dim,Fh] → [B,N,N,H,Fh]
+        # Applying LeakyReLU before the dot product makes the score
+        # non-decomposable, fixing GATv1's rank-collapse failure mode.
+        transformed = torch.einsum('bnmhd,hdo->bnmho', pair, self.W_pair)
+        transformed = self.leaky_relu(transformed)          # [B, N, N, H, Fh]
+        attn_vec    = self.attn.view(1, 1, 1, H, -1)       # [1, 1, 1, H, Fh]
+        e = (transformed * attn_vec).sum(dim=-1)            # [B, N, N, H]
 
         # Mask zero-weight edges (no connection)
         no_edge = (adj == 0).unsqueeze(-1).expand(-1, -1, -1, H)

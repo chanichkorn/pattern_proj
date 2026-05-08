@@ -1,0 +1,25 @@
+2026-05-08 18:27:28  INFO      Backtest on device: mps
+2026-05-08 18:27:28  INFO      Loaded 1109 windows — X(1109, 40, 17) A(1109, 40, 40) C(1109, 40, 40)
+2026-05-08 18:27:28  INFO      Chronological split — train: 776 | val: 166 | test: 167 windows
+2026-05-08 18:27:28  INFO      Pre-computing graph conditioning vectors...
+2026-05-08 18:27:28  INFO      Pre-computing graph conditioning vectors...
+2026-05-08 18:27:28  INFO      Pre-computing graph conditioning vectors...
+2026-05-08 18:27:28  INFO      Feature normalizer fitted and saved.
+2026-05-08 18:27:28  INFO      Test set: 167 windows  |  N=40
+2026-05-08 18:27:28  INFO      GAT initialised — d=17 → 256 → 32 (heads: 4/4)
+2026-05-08 18:27:28  INFO      Generator (factor model) — N=40  K=8  noise=128  cond=32  hidden=512  factor_entries=360  params=1,321,320
+2026-05-08 18:27:28  INFO      Loaded checkpoint: results/checkpoints/best.pt
+2026-05-08 18:27:29  INFO        Step    1/167 | date=2019-04-25 | our_model_ret=-0.0044
+2026-05-08 18:27:29  INFO        Step   51/167 | date=2019-07-10 | our_model_ret=0.0087
+2026-05-08 18:27:30  INFO        Step  101/167 | date=2019-09-23 | our_model_ret=-0.0082
+2026-05-08 18:27:31  INFO        Step  151/167 | date=2019-12-04 | our_model_ret=0.0004
+2026-05-08 18:27:31  INFO      Results saved to results/backtest_results.npy
+
+========================================================================
+  Strategy                  Ann.Ret  Ann.Vol   Sharpe    MaxDD  Turnover
+========================================================================
+  Our Model (GAT+GAN)      -13.48%   10.85%   -1.243  -14.27%    0.0249
+  Equal Weight (1/N)        -8.40%   12.55%   -0.670  -12.18%    0.0000
+  Sample Cov GMV           -10.27%    9.64%   -1.065  -11.85%    0.0086
+========================================================================
+

@@ -1,0 +1,10 @@
+torch>=2.1
+numpy>=1.26
+pandas>=2.0
+pyarrow>=14.0
+PyYAML>=6.0
+yfinance>=0.2.36
+tqdm>=4.66
+cvxpy>=1.4
+arch>=6.3
+scipy>=1.11

@@ -1,5 +1,5 @@
 end_date: '2019-12-31'
-feature_dim: 15
+feature_dim: 17
 n_stocks: 40
 n_windows: 1109
 start_date: '2015-01-01'
