@@ -241,6 +241,12 @@ def run_backtest(
         import yaml as _yaml
         meta = _yaml.safe_load(f)
 
+    # Windows are indexed from start_t=max(window,long_window) in data_pipeline.
+    # Map dataset window index -> returns index with the same offset.
+    window_size = int(meta.get("window_size", window))
+    long_window = int(meta.get("long_window", window_size))
+    start_t = max(window_size, long_window)
+
     test_indices = test_ds.indices   # indices into the full window array
 
     # DCC-GARCH needs a longer window: at least 252 days for stable GARCH fit
@@ -251,7 +257,7 @@ def run_backtest(
     steps_since_rebalance = 0
 
     for step, idx in enumerate(test_indices):
-        hold_start = idx + window
+        hold_start = idx + start_t
         hold_end   = hold_start + 1
         if hold_end > len(returns_arr):
             break
