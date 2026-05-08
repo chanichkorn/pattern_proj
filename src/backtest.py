@@ -243,9 +243,9 @@ def run_backtest(
 
     # Windows are indexed from start_t=max(window,long_window) in data_pipeline.
     # Map dataset window index -> returns index with the same offset.
-    window_size = int(meta.get("window_size", window))
-    long_window = int(meta.get("long_window", window_size))
-    start_t = max(window_size, long_window)
+    meta_window_size = int(meta.get("window_size", window))
+    meta_long_window = int(meta.get("long_window", meta_window_size))
+    start_t = max(meta_window_size, meta_long_window)
 
     test_indices = test_ds.indices   # indices into the full window array
 
