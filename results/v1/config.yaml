@@ -1,0 +1,161 @@
+# ============================================================
+#  SET50 Portfolio Optimization — Central Configuration
+# ============================================================
+
+data:
+  start_date: "2010-01-01"
+  end_date:   "2023-12-31"
+  raw_dir:    "data/raw"
+  processed_dir: "data/processed"
+
+  # Rolling windows for features (trading days)
+  window: 21        # short window: ~1 month
+  long_window: 63   # long window:  ~3 months
+
+  # Minimum fraction of valid data required per stock
+  min_valid_fraction: 0.90
+
+  # SET50 tickers (approximate 2015-2019 constituents)
+  tickers:
+    - "ADVANC.BK"   # Telecom
+    - "AOT.BK"      # Transport
+    - "AWC.BK"      # Property
+    - "BANPU.BK"    # Energy
+    - "BAY.BK"      # Banking
+    - "BBL.BK"      # Banking
+    - "BDMS.BK"     # Healthcare
+    - "BEC.BK"      # Media
+    - "BEM.BK"      # Transport
+    - "BGRIM.BK"    # Energy
+    - "BH.BK"       # Healthcare
+    - "BTS.BK"      # Transport
+    - "CBG.BK"      # Food & Beverage
+    - "CENTEL.BK"   # Food & Beverage
+    - "CK.BK"       # Industrial
+    - "COM7.BK"     # Retail
+    - "CPALL.BK"    # Retail
+    - "CPF.BK"      # Food & Beverage
+    - "CPN.BK"      # Property
+    - "DELTA.BK"    # Industrial
+    - "DTAC.BK"     # Telecom
+    - "EA.BK"       # Energy
+    - "EGCO.BK"     # Energy
+    - "GLOBAL.BK"   # Retail
+    - "GPSC.BK"     # Energy
+    - "GULF.BK"     # Energy
+    - "HMPRO.BK"    # Retail
+    - "INTUCH.BK"   # Telecom
+    - "IVL.BK"      # Industrial
+    - "KBANK.BK"    # Banking
+    - "KCE.BK"      # Industrial
+    - "KKP.BK"      # Banking
+    - "KTB.BK"      # Banking
+    - "KTC.BK"      # Finance
+    - "LH.BK"       # Property
+    - "MINT.BK"     # Food & Beverage
+    - "MTC.BK"      # Finance
+    - "OR.BK"       # Energy
+    - "OSP.BK"      # Food & Beverage
+    - "PTT.BK"      # Energy
+    - "PTTEP.BK"    # Energy
+    - "PTTGC.BK"    # Energy
+    - "RATCH.BK"    # Energy
+    - "SAWAD.BK"    # Finance
+    - "SCB.BK"      # Banking
+    - "SCC.BK"      # Industrial
+    - "TISCO.BK"    # Banking
+    - "TMB.BK"      # Banking
+    - "TOP.BK"      # Energy
+    - "TRUE.BK"     # Telecom
+
+  sector_map:
+    "ADVANC.BK": "Telecom"
+    "AOT.BK":    "Transport"
+    "AWC.BK":    "Property"
+    "BANPU.BK":  "Energy"
+    "BAY.BK":    "Banking"
+    "BBL.BK":    "Banking"
+    "BDMS.BK":   "Healthcare"
+    "BEC.BK":    "Media"
+    "BEM.BK":    "Transport"
+    "BGRIM.BK":  "Energy"
+    "BH.BK":     "Healthcare"
+    "BTS.BK":    "Transport"
+    "CBG.BK":    "Food"
+    "CENTEL.BK": "Food"
+    "CK.BK":     "Industrial"
+    "COM7.BK":   "Retail"
+    "CPALL.BK":  "Retail"
+    "CPF.BK":    "Food"
+    "CPN.BK":    "Property"
+    "DELTA.BK":  "Industrial"
+    "DTAC.BK":   "Telecom"
+    "EA.BK":     "Energy"
+    "EGCO.BK":   "Energy"
+    "GLOBAL.BK": "Retail"
+    "GPSC.BK":   "Energy"
+    "GULF.BK":   "Energy"
+    "HMPRO.BK":  "Retail"
+    "INTUCH.BK": "Telecom"
+    "IVL.BK":    "Industrial"
+    "KBANK.BK":  "Banking"
+    "KCE.BK":    "Industrial"
+    "KKP.BK":    "Banking"
+    "KTB.BK":    "Banking"
+    "KTC.BK":    "Finance"
+    "LH.BK":     "Property"
+    "MINT.BK":   "Food"
+    "MTC.BK":    "Finance"
+    "OR.BK":     "Energy"
+    "OSP.BK":    "Food"
+    "PTT.BK":    "Energy"
+    "PTTEP.BK":  "Energy"
+    "PTTGC.BK":  "Energy"
+    "RATCH.BK":  "Energy"
+    "SAWAD.BK":  "Finance"
+    "SCB.BK":    "Banking"
+    "SCC.BK":    "Industrial"
+    "TISCO.BK":  "Banking"
+    "TMB.BK":    "Banking"
+    "TOP.BK":    "Energy"
+    "TRUE.BK":   "Telecom"
+
+graph:
+  # Correlation threshold to draw an edge
+  threshold: 0.3
+  # Use absolute value of correlation for edge weights
+  abs_correlation: true
+
+model:
+  gat:
+    node_feature_dim: 25     # 7 numeric × 2 windows (21d + 63d) + 11 sector one-hot
+    hidden_dim: 64
+    embedding_dim: 32
+    num_heads_l1: 4
+    num_heads_l2: 4
+    num_heads_l3: 4
+    dropout: 0.1
+
+  gan:
+    noise_dim: 128
+    condition_dim: 32        # = gat.embedding_dim (graph-level pooling)
+    hidden_dim: 1024
+    n_critic_steps: 5
+    gp_lambda: 10
+    lr: 0.0001
+    beta1: 0.0
+    beta2: 0.9
+    batch_size: 64
+    epochs: 300
+    use_ema: true
+    ema_decay: 0.999
+    grad_clip: 1.0
+    lr_scheduler: "cosine"
+
+backtest:
+  train_months: 12
+  rebalance: "monthly"
+  transaction_cost: 0.0025   # 0.25% round-trip
+  max_weight: 0.10           # 10% cap per stock
+
+seed: 42

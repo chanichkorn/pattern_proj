@@ -1,0 +1,23 @@
+# SET50 Portfolio Optimization — Dependencies
+# Python >= 3.11 required (uses X | Y union type hints)
+
+# Deep Learning
+torch>=2.2.0
+
+# Data
+numpy>=1.26.0
+pandas>=2.2.0
+pyarrow>=15.0.0          # parquet read/write (pandas backend)
+yfinance>=0.2.38         # SET50 price download
+tqdm>=4.66.0             # progress bars
+
+# Statistics / Optimization
+scipy>=1.12.0            # skewness in features
+arch>=6.3.0              # GARCH + DCC-GARCH baseline
+cvxpy>=1.4.0             # GMV portfolio solver
+
+# Config
+pyyaml>=6.0.1
+
+# Plotting
+matplotlib>=3.8.0
