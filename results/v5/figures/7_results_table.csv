@@ -1,0 +1,5 @@
+Strategy,Ann. Return (%),Ann. Vol (%),Sharpe Ratio,Max Drawdown (%),Avg Turnover,Total Return (%)
+Our Model (GAT+GAN),0.96,10.53,0.091,-10.97,0.0196,1.91
+DCC-GARCH GMV,-0.44,9.56,-0.046,-12.26,0.0158,-0.86
+Sample Cov GMV,0.06,9.77,0.006,-11.56,0.0055,0.11
+Equal Weight (1/N),-0.86,11.66,-0.074,-14.59,0.0,-1.69

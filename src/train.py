@@ -459,13 +459,22 @@ def train(
 
     # ── Optimisers ────────────────────────────────────────────────────────
     # Generator and GAT share one optimiser — they update jointly
+    lr_g = gcfg.get("lr", 0.0001)
+    lr_d = gcfg.get("critic_lr", lr_g)
+    weight_decay = float(gcfg.get("weight_decay", 0.0))
+
     opt_G = torch.optim.Adam(
         list(gat.parameters()) + list(generator.parameters()),
-        lr=gcfg["lr"], betas=(gcfg["beta1"], gcfg["beta2"]),
+        lr=lr_g, 
+        betas=(gcfg["beta1"], gcfg["beta2"]),
+        weight_decay=weight_decay
     )
+    
     opt_D = torch.optim.Adam(
         critic.parameters(),
-        lr=gcfg["lr"], betas=(gcfg["beta1"], gcfg["beta2"]),
+        lr=lr_d, 
+        betas=(gcfg["beta1"], gcfg["beta2"]),
+        weight_decay=weight_decay
     )
 
     # ── LR Schedulers ─────────────────────────────────────────────────────
