@@ -5,6 +5,5 @@ Equal Weight (1/N),-8.4,12.55,-0.67,-12.18,0.0,-5.65,*Baseline*
 V0,-11.16,10.53,-1.06,-11.33,0.0275,-7.54,*Baseline*
 V1,-0.17,10.04,-0.017,-14.61,0.0189,-0.34, ขยายช่วงข้อมูลเป็นปี 2010–2023 พร้อมเพิ่ม Dual Rolling Windows และฟีเจอร์ใหม่ (node_feature_dim เป็น 25) // อัปเกรด GAT ด้วย Residual connections // เลเยอร์ที่ 3 และ AttentionPooling // ปรับ GAN Generator เป็น ResBlock (hidden_dim 1024) พร้อมใส่ Spectral Norm ใน Critic // และปรับ Training Pipeline โดยเพิ่ม EMA Cosine LR Scheduler และ Gradient Clipping
 V2,-0.65,10.49,-0.062,-12.21,0.0161,-1.28, ปรับ Short window จาก 21 เป็น 42 วัน // อัปเกรดโมเดล GAT (ขยาย hidden_dim เป็น 128 // เพิ่ม Attention heads เป็น 8 ในทุกเลเยอร์ // ปรับ Dropout ขึ้นเป็น 0.4) และเพิ่มพารามิเตอร์การเทรน GAN (แยก critic_lr เป็น 0.0003 และเพิ่ม weight_decay 1e-4)
-V3,-1.33,10.62,-0.126,-13.54,0.0203,-2.62,ปรับ window กลับเป็น 21 วัน // ลดขนาด GAT (hidden_dim 64 heads 4-4-1 dropout 0.2) // ลดขนาด GAN (hidden_dim 512 weight_decay 1e-05)
-V4,-1.33,10.62,-0.126,-13.54,0.0203,-2.62,
-V5,0.96,10.53,0.091,-10.97,0.0196,1.91,
+V4,-1.33,10.62,-0.126,-13.54,0.0203,-2.62,ปรับ window กลับเป็น 21 วัน // ลดขนาด GAT (hidden_dim 64 heads 4-4-1 dropout 0.2) // ลดขนาด GAN (hidden_dim 512 weight_decay 1e-05)
+V5,0.96,10.53,0.091,-10.97,0.0196,1.91,ปรับ GAT (เพิ่ม num_heads_l3 เป็น 4, ลด dropout เหลือ 0.1) และปรับ GAN คืนค่าเดิม (เพิ่ม hidden_dim 1024, ลบ critic_lr, ปิด weight_decay 0.0)
